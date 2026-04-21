@@ -78,12 +78,6 @@ git clone https://github.com/vivibudong/EasyMail.git
 cd EasyMail
 cp .env.example .env
 docker build -t easymail:local .
-docker run -d \
-  --name easymail-local \
-  -p 3000:8000 \
-  --env-file .env \
-  -v $(pwd)/data:/app/data \
-  easymail:local
 ```
 
 ## 项目结构
@@ -94,3 +88,20 @@ frontend/  Vue 前端
 data/      运行时数据目录
 img/       演示图
 ```
+### License
+
+his project is licensed under the [MIT License](LICENSE), allowing free use, modification, and distribution with proper attribution.
+
+### Contact
+
+For issues or suggestions, open an issue on GitHub or reach out via email: budongkejivivi@gmail.com
+
+<div align="center"> <strong>Made with ❤️ by <a href="https://github.com/vivibudong">Vivi不懂</a></strong> </div>
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/chart?repos=vivibudong/EasyMail&type=date&legend=top-left)](https://www.star-history.com/?repos=vivibudong%2FEasyMail&type=date&legend=top-left)
+
+
+
+
