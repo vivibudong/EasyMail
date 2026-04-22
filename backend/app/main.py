@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from .auth import create_access_token, get_current_user
 from .config import config
 from .manager import MailManager
+from .models import DEFAULT_IMPORT_DELIMITERS
 from .storage import SqliteStorage
 
 storage = SqliteStorage(config.data_dir)
@@ -103,15 +104,14 @@ class MailStarRequest(BaseModel):
 
 class SettingsRequest(BaseModel):
     auto_receive_interval: int = 120
-    txt_delimiter_preset: str = "dash3"
-    txt_delimiter_regex: str = r"-{3,}"
-    import_delimiters: list[str] = Field(default_factory=lambda: [r"-{3,}", r"\|\|", r"\|", r",", r";", r"\t"])
+    import_delimiters: list[str] = Field(default_factory=lambda: DEFAULT_IMPORT_DELIMITERS.copy())
     txt_comment_prefix: str = "#"
     txt_skip_first_line: bool = False
     startup_auto_login: bool = True
     mail_list_limit: int = 0
     mark_read_on_open: bool = True
-    custom_groups: list[str] = Field(default_factory=list)
+    custom_groups: list[dict] = Field(default_factory=list)
+    custom_tags: list[dict] = Field(default_factory=list)
     auto_receive_enabled: bool = False
     auto_receive_interval_minutes: int = 15
     token_refresh_enabled: bool = False

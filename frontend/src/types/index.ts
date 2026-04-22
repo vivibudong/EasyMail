@@ -89,8 +89,6 @@ export interface DashboardState {
 
 export interface AppSettings {
   auto_receive_interval: number
-  txt_delimiter_preset: string
-  txt_delimiter_regex: string
   import_delimiters: string[]
   txt_comment_prefix: string
   txt_skip_first_line: boolean

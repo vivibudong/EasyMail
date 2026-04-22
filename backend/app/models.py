@@ -7,6 +7,7 @@ from typing import Optional
 
 IMAP_HOST = "imap-mail.outlook.com"
 IMAP_PORT = 993
+DEFAULT_IMPORT_DELIMITERS = ["---", "||", "|", ",", ";", r"\t"]
 
 
 @dataclass
@@ -65,10 +66,8 @@ class TagDefinition:
 @dataclass
 class AppSettings:
     auto_receive_interval: int = 120
-    txt_delimiter_preset: str = "auto"
-    txt_delimiter_regex: str = r"\s*(?:-{3,}|\|\||\||,|;|\t)\s*"
     import_delimiters: list[str] = field(
-        default_factory=lambda: [r"-{3,}", r"\|\|", r"\|", r",", r";", r"\t"]
+        default_factory=lambda: DEFAULT_IMPORT_DELIMITERS.copy()
     )
     txt_comment_prefix: str = "#"
     txt_skip_first_line: bool = False
@@ -196,9 +195,7 @@ def account_from_dict(data: dict) -> Optional[MailAccount]:
 def settings_to_dict(settings: AppSettings) -> dict:
     return {
         "auto_receive_interval": settings.auto_receive_interval,
-        "txt_delimiter_preset": settings.txt_delimiter_preset,
-        "txt_delimiter_regex": settings.txt_delimiter_regex,
-        "import_delimiters": settings.import_delimiters,
+        "import_delimiters": normalize_import_delimiters(settings.import_delimiters),
         "txt_comment_prefix": settings.txt_comment_prefix,
         "txt_skip_first_line": settings.txt_skip_first_line,
         "startup_auto_login": settings.startup_auto_login,
@@ -221,6 +218,28 @@ def settings_to_dict(settings: AppSettings) -> dict:
         "backup_directory": settings.backup_directory,
         "backup_keep_count": settings.backup_keep_count,
     }
+
+
+def normalize_import_delimiters(values: object) -> list[str]:
+    raw_values = values if isinstance(values, list) else []
+    legacy_map = {
+        "-{3,}": "---",
+        r"\|\|": "||",
+        r"\|": "|",
+        r"\t": r"\t",
+        "\t": r"\t",
+        "tab": r"\t",
+        "TAB": r"\t",
+    }
+    cleaned: list[str] = []
+    for item in raw_values:
+        value = str(item).strip()
+        if not value:
+            continue
+        value = legacy_map.get(value, value)
+        if value not in cleaned:
+            cleaned.append(value)
+    return cleaned or DEFAULT_IMPORT_DELIMITERS.copy()
 
 
 def settings_from_dict(data: dict) -> AppSettings:
@@ -262,13 +281,7 @@ def settings_from_dict(data: dict) -> AppSettings:
 
     return AppSettings(
         auto_receive_interval=int(data.get("auto_receive_interval", 120) or 120),
-        txt_delimiter_preset=str(data.get("txt_delimiter_preset", "auto")),
-        txt_delimiter_regex=str(data.get("txt_delimiter_regex", r"\s*(?:-{3,}|\|\||\||,|;|\t)\s*")),
-        import_delimiters=[
-            str(item).strip()
-            for item in data.get("import_delimiters", [r"-{3,}", r"\|\|", r"\|", r",", r";", r"\t"])
-            if str(item).strip()
-        ],
+        import_delimiters=normalize_import_delimiters(data.get("import_delimiters", DEFAULT_IMPORT_DELIMITERS)),
         txt_comment_prefix=str(data.get("txt_comment_prefix", "#")),
         txt_skip_first_line=bool(data.get("txt_skip_first_line", False)),
         startup_auto_login=bool(data.get("startup_auto_login", True)),

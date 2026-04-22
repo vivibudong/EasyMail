@@ -15,11 +15,12 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
-from .models import MailAccount, MailItem
+from .models import DEFAULT_IMPORT_DELIMITERS, MailAccount, MailItem
 
 OAUTH_SCOPE = "https://outlook.office.com/IMAP.AccessAsUser.All offline_access"
 GRAPH_SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access"
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
+EMAIL_PATTERN = re.compile(r"^[^\s@<>'\",;|]+@[^\s@<>'\",;|]+\.[^\s@<>'\",;|]+$")
 
 
 def decode_text(raw_value: Optional[str]) -> str:
@@ -79,30 +80,71 @@ def extract_body_text(msg: email.message.Message) -> str:
         return payload.decode("utf-8", errors="replace").strip()
 
 
+def _build_import_patterns(import_delimiters: list[str]) -> list[str]:
+    patterns: list[str] = []
+    seen: set[str] = set()
+    legacy_patterns = {
+        "---": r"-{3,}",
+        "-{3,}": r"-{3,}",
+        "||": r"\|\|",
+        r"\|\|": r"\|\|",
+        "|": r"\|",
+        r"\|": r"\|",
+        ",": ",",
+        ";": ";",
+        r"\t": r"\t",
+        "\t": r"\t",
+        "tab": r"\t",
+        "TAB": r"\t",
+    }
+    for raw_delimiter in [*import_delimiters, *DEFAULT_IMPORT_DELIMITERS]:
+        value = str(raw_delimiter or "").strip()
+        if not value:
+            continue
+        candidate_patterns: list[str] = []
+        if value in legacy_patterns:
+            candidate_patterns.append(legacy_patterns[value])
+        else:
+            literal_value = value.replace(r"\t", "\t").replace(r"\|", "|")
+            candidate_patterns.append(re.escape(literal_value))
+            if any(char in value for char in ["\\", "{", "}", "[", "]", "(", ")", "+", "*", "?"]):
+                candidate_patterns.append(value)
+        for pattern in candidate_patterns:
+            wrapped = rf"\s*(?:{pattern})\s*"
+            if wrapped not in seen:
+                seen.add(wrapped)
+                patterns.append(wrapped)
+    return patterns
+
+
 def parse_line_to_account(
     line: str, delimiter_regex: str, comment_prefix: str
-) -> Optional[MailAccount]:
+) -> tuple[Optional[MailAccount], int]:
     source = line.strip()
     if not source:
-        return None
+        return None, 0
     if comment_prefix and source.startswith(comment_prefix):
-        return None
+        return None, 0
     parts = [part.strip() for part in re.split(delimiter_regex, source) if part.strip()]
-    if not parts or "@" not in parts[0]:
-        return None
-    return MailAccount(
-        email=parts[0],
-        password=parts[1] if len(parts) > 1 else "",
-        auth_code_or_client_id=parts[2] if len(parts) > 2 else "",
-        token=parts[3] if len(parts) > 3 else "",
+    if not parts:
+        return None, 0
+    email_addr = parts[0]
+    if not EMAIL_PATTERN.fullmatch(email_addr):
+        return None, len(parts)
+    return (
+        MailAccount(
+            email=email_addr,
+            password=parts[1] if len(parts) > 1 else "",
+            auth_code_or_client_id=parts[2] if len(parts) > 2 else "",
+            token=parts[3] if len(parts) > 3 else "",
+        ),
+        len(parts),
     )
 
 
 def parse_text_to_accounts(
     content: str,
     *,
-    delimiter_regex: str,
-    delimiter_preset: str,
     import_delimiters: list[str],
     comment_prefix: str,
     skip_first_line: bool,
@@ -111,37 +153,27 @@ def parse_text_to_accounts(
     if skip_first_line and lines:
         lines = lines[1:]
 
-    presets = [delimiter_regex.strip() or r"\s*(?:-{3,}|\|\||\||,|;|\t)\s*"]
-    for delimiter in import_delimiters:
-        delimiter = delimiter.strip()
-        if not delimiter:
-            continue
-        presets.append(rf"\s*(?:{delimiter})\s*")
-    presets.extend(
-        [
-            r"\s*(?:-{3,})\s*",
-            r"\s*\|\|\s*",
-            r"\s*\|\s*",
-            r"\s*,\s*",
-            r"\s*;\s*",
-            r"\s+\|\|\s+",
-        ]
-    )
-    if delimiter_preset != "auto":
-        presets = [presets[0]]
-
+    presets = _build_import_patterns(import_delimiters)
     best_items: list[MailAccount] = []
+    best_score = (-1, -1, -1)
     for regex in presets:
         try:
             re.compile(regex)
         except re.error:
             continue
         parsed_items: list[MailAccount] = []
+        credential_lines = 0
+        field_score = 0
         for line in lines:
-            item = parse_line_to_account(line, regex, comment_prefix)
+            item, field_count = parse_line_to_account(line, regex, comment_prefix)
             if item:
                 parsed_items.append(item)
-        if len(parsed_items) > len(best_items):
+                if field_count > 1:
+                    credential_lines += 1
+                field_score += min(field_count, 4)
+        score = (len(parsed_items), credential_lines, field_score)
+        if score > best_score:
+            best_score = score
             best_items = parsed_items
     return best_items
 

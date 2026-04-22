@@ -21,11 +21,13 @@ from .imap_logic import (
 from .models import (
     AppSettings,
     BodyTask,
+    DEFAULT_IMPORT_DELIMITERS,
     GroupDefinition,
     MailAccount,
     MailItem,
     TagDefinition,
     account_to_dict,
+    normalize_import_delimiters,
     settings_to_dict,
 )
 from .storage import SqliteStorage
@@ -69,13 +71,25 @@ class MailManager:
 
         self.settings.custom_groups = self._sort_groups(self.settings.custom_groups)
         self.settings.custom_tags = self._sort_tags(self.settings.custom_tags)
+        self.settings.import_delimiters = normalize_import_delimiters(self.settings.import_delimiters)
 
+        repaired_accounts = self._repair_legacy_imported_accounts()
         for account in self.accounts:
             if not account.group_name:
                 account.group_name = "未分组"
             account.mails = self.storage.load_mail_cache(account, self.local_read_keys)
             if account.mails and account.status == "待登录":
                 account.status = "已缓存"
+        if repaired_accounts:
+            self._save_accounts_state()
+            self.log_event(
+                "info",
+                "account",
+                "repair_import",
+                "batch",
+                "修复旧导入账号字段",
+                {"count": repaired_accounts},
+            )
         self.rebuild_mail_pool()
         self._start_workers()
         if self.accounts and self.settings.startup_auto_login:
@@ -169,6 +183,51 @@ class MailManager:
 
     def _save_accounts_state(self) -> None:
         self.storage.save_accounts(self.accounts)
+
+    def _repair_legacy_imported_accounts(self) -> int:
+        repaired = 0
+        for index, account in enumerate(self.accounts):
+            if account.password or account.auth_code_or_client_id or account.token:
+                continue
+            if "@" not in account.email or not any(token in account.email for token in ("||", "---", "|", ",", ";", "\t")):
+                continue
+            parsed = parse_text_to_accounts(
+                account.email,
+                import_delimiters=self.settings.import_delimiters or DEFAULT_IMPORT_DELIMITERS.copy(),
+                comment_prefix=self.settings.txt_comment_prefix,
+                skip_first_line=False,
+            )
+            if not parsed:
+                continue
+            repaired_account = parsed[0]
+            if repaired_account.email == account.email:
+                continue
+            duplicate = next(
+                (
+                    item
+                    for item_index, item in enumerate(self.accounts)
+                    if item_index != index and item.email.lower() == repaired_account.email.lower()
+                ),
+                None,
+            )
+            if duplicate is not None:
+                continue
+            repaired_account.group_name = account.group_name or "未分组"
+            repaired_account.flag_color = account.flag_color
+            repaired_account.tags = account.tags.copy()
+            repaired_account.mails = account.mails
+            repaired_account.status = "待登录"
+            repaired_account.last_check = account.last_check
+            repaired_account.unseen_count = account.unseen_count
+            repaired_account.last_error = account.last_error
+            repaired_account.auth_method = account.auth_method
+            repaired_account.cached_access_token = ""
+            repaired_account.cached_access_expire_at = 0.0
+            repaired_account.cached_graph_access_token = ""
+            repaired_account.cached_graph_access_expire_at = 0.0
+            self.accounts[index] = repaired_account
+            repaired += 1
+        return repaired
 
     def find_account(self, email_addr: str) -> Optional[MailAccount]:
         for account in self.accounts:
@@ -582,12 +641,9 @@ class MailManager:
 
     def import_accounts(self, file_bytes: bytes) -> dict:
         with self.lock:
-            re.compile(self.settings.txt_delimiter_regex)
             content = self._decode_text_content(file_bytes)
             new_items = parse_text_to_accounts(
                 content,
-                delimiter_regex=self.settings.txt_delimiter_regex,
-                delimiter_preset=self.settings.txt_delimiter_preset,
                 import_delimiters=self.settings.import_delimiters,
                 comment_prefix=self.settings.txt_comment_prefix,
                 skip_first_line=self.settings.txt_skip_first_line,
@@ -645,21 +701,12 @@ class MailManager:
 
     def update_settings(self, payload: dict) -> dict:
         with self.lock:
-            regex = str(payload.get("txt_delimiter_regex", self.settings.txt_delimiter_regex)).strip() or r"-{3,}"
-            re.compile(regex)
             self.settings.auto_receive_interval = int(
                 payload.get("auto_receive_interval", self.settings.auto_receive_interval) or 120
             )
-            self.settings.txt_delimiter_preset = str(
-                payload.get("txt_delimiter_preset", self.settings.txt_delimiter_preset)
+            self.settings.import_delimiters = normalize_import_delimiters(
+                payload.get("import_delimiters", self.settings.import_delimiters)
             )
-            self.settings.txt_delimiter_regex = regex
-            import_delimiters = [
-                str(item).strip()
-                for item in payload.get("import_delimiters", self.settings.import_delimiters)
-                if str(item).strip()
-            ]
-            self.settings.import_delimiters = import_delimiters or [r"-{3,}", r"\|\|", r"\|", r",", r";", r"\t"]
             self.settings.txt_comment_prefix = str(
                 payload.get("txt_comment_prefix", self.settings.txt_comment_prefix)
             )

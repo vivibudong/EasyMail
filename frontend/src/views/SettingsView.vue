@@ -11,22 +11,6 @@
 
         <div class="card-body grid gap-5 md:grid-cols-2">
           <label class="space-y-2">
-            <span class="input-label mb-0">TXT 分隔模板</span>
-            <select v-model="form.txt_delimiter_preset" class="input" @change="onPresetChange">
-              <option value="auto">auto</option>
-              <option value="dash3">dash3</option>
-              <option value="comma">comma</option>
-              <option value="pipe">pipe</option>
-              <option value="custom">custom</option>
-            </select>
-          </label>
-
-          <label class="space-y-2">
-            <span class="input-label mb-0">TXT 分隔正则</span>
-            <input v-model="form.txt_delimiter_regex" class="input" type="text" />
-          </label>
-
-          <label class="space-y-2">
             <span class="input-label mb-0">注释前缀</span>
             <input v-model="form.txt_comment_prefix" class="input" type="text" />
           </label>
@@ -50,11 +34,11 @@
                 </span>
               </div>
               <div class="flex gap-2">
-                <input v-model="newDelimiter" class="input" type="text" placeholder="例如：\\|\\| 或 ;" />
+                <input v-model="newDelimiter" class="input" type="text" placeholder="例如：||、;、TAB" />
                 <button class="btn btn-secondary" @click="addDelimiter">添加</button>
               </div>
               <p class="mt-2 text-xs text-gray-500 dark:text-dark-400">
-                导入时会自动尝试这些分隔符，并自动忽略分隔符前后的空格。
+                导入时会自动尝试这些分隔符，并自动忽略前后的空格；旧格式中的 `\\|\\|`、`-{3,}` 也会自动兼容。
               </p>
             </div>
           </div>
@@ -86,8 +70,8 @@
           <h3 class="mb-3 text-base font-semibold text-gray-900 dark:text-white">账号导入格式</h3>
           <div class="space-y-2 text-sm leading-7 text-gray-600 dark:text-dark-300">
             <p>支持多段文本导入格式：</p>
-            <code class="code-block block">email---password---client_id---refresh_token</code>
-            <p>也支持 `comma`、`pipe` 或自定义正则分隔。</p>
+            <code class="code-block block">email || password || client_id || refresh_token</code>
+            <p>也支持 `---`、`|`、`,`、`;`、`TAB` 等分隔形式。</p>
           </div>
         </div>
 
@@ -113,9 +97,7 @@ import type { AppSettings } from '@/types'
 
 const form = reactive<AppSettings>({
   auto_receive_interval: 120,
-  txt_delimiter_preset: 'auto',
-  txt_delimiter_regex: '\\s*(?:-{3,}|\\|\\||\\||,|;|\\t)\\s*',
-  import_delimiters: ['-{3,}', '\\|\\|', '\\|', ',', ';', '\\t'],
+  import_delimiters: ['---', '||', '|', ',', ';', '\\t'],
   txt_comment_prefix: '#',
   txt_skip_first_line: false,
   startup_auto_login: true,
@@ -142,20 +124,10 @@ onMounted(async () => {
   Object.assign(form, response.data)
 })
 
-function onPresetChange() {
-  const mapping: Record<string, string> = {
-    auto: '\\s*(?:-{3,}|\\|\\||\\||,|;|\\t)\\s*',
-    dash3: '-{3,}',
-    comma: ',',
-    pipe: '\\|',
-  }
-  if (mapping[form.txt_delimiter_preset]) {
-    form.txt_delimiter_regex = mapping[form.txt_delimiter_preset]
-  }
-}
-
 function addDelimiter() {
-  const value = newDelimiter.value.trim()
+  const raw = newDelimiter.value.trim()
+  if (!raw) return
+  const value = raw.toUpperCase() === 'TAB' ? '\\t' : raw
   if (!value) return
   if (!form.import_delimiters.includes(value)) {
     form.import_delimiters.push(value)
