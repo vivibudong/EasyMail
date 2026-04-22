@@ -1367,15 +1367,11 @@ function computeAccountPageSizeFromRows(container: HTMLElement) {
   if (!rows.length) {
     return computePageSize(container.clientHeight - 4, 70, 5)
   }
-  const availableHeight = container.clientHeight
-  let usedHeight = 0
-  let fitCount = 0
-  for (const row of rows) {
-    usedHeight += row.offsetHeight
-    if (usedHeight > availableHeight) break
-    fitCount += 1
-  }
-  return Math.max(1, fitCount || 1)
+  const firstRow = rows[0]
+  const rowStyle = window.getComputedStyle(firstRow)
+  const marginBottom = Number.parseFloat(rowStyle.marginBottom || '0') || 0
+  const rowHeight = Math.max(1, firstRow.offsetHeight + marginBottom)
+  return computePageSize(container.clientHeight - 4, rowHeight, 1)
 }
 
 function scheduleAutoPageSizing() {
