@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import json
 import re
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +23,8 @@ from .manager import MailManager
 from .models import DEFAULT_IMPORT_DELIMITERS
 from .storage import SqliteStorage
 
+GRAPH_REAUTH_SCOPE = "offline_access openid profile https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read"
+
 storage = SqliteStorage(config.data_dir)
 manager = MailManager(storage)
 
@@ -27,6 +36,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@dataclass
+class GraphReauthSession:
+    session_id: str
+    email: str
+    client_id: str
+    device_code: str
+    user_code: str
+    verification_uri: str
+    expires_at: float
+    interval: int
+    status: str = "pending"
+    message: str = ""
+    next_poll_at: float = 0.0
+
+
+graph_reauth_sessions: dict[str, GraphReauthSession] = {}
 
 
 class LoginRequest(BaseModel):
@@ -93,6 +120,10 @@ class AccountUpdateRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
+class GraphReauthStartRequest(BaseModel):
+    email: str
+
+
 class MailOpenRequest(BaseModel):
     local_key: str
 
@@ -124,6 +155,113 @@ class SettingsRequest(BaseModel):
 
 def ok(message: str, data: Optional[dict] = None) -> dict:
     return {"success": True, "message": message, "data": data or {}}
+
+
+def _post_form_json(url: str, payload: dict[str, str]) -> dict:
+    body = urllib.parse.urlencode(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        raise ValueError(raw) from exc
+    try:
+        data = json.loads(raw)
+    except Exception as exc:
+        raise ValueError(raw) from exc
+    if not isinstance(data, dict):
+        raise ValueError(raw)
+    return data
+
+
+def _serialize_graph_reauth_session(session: GraphReauthSession) -> dict:
+    return {
+        "session_id": session.session_id,
+        "email": session.email,
+        "client_id": session.client_id,
+        "user_code": session.user_code,
+        "verification_uri": session.verification_uri,
+        "expires_in": max(0, int(session.expires_at - time.time())),
+        "interval": session.interval,
+        "status": session.status,
+        "message": session.message,
+    }
+
+
+def _apply_graph_reauth_success(session: GraphReauthSession, token_payload: dict) -> None:
+    refresh_token = str(token_payload.get("refresh_token", "") or "")
+    if not refresh_token:
+        raise ValueError("微软返回中缺少 refresh_token")
+    account = manager.find_account(session.email)
+    if not account:
+        raise ValueError("账号不存在，无法保存新令牌")
+    with manager.lock:
+        account.auth_code_or_client_id = session.client_id
+        account.token = refresh_token
+        account.cached_access_token = ""
+        account.cached_access_expire_at = 0.0
+        account.cached_graph_access_token = ""
+        account.cached_graph_access_expire_at = 0.0
+        account.last_error = ""
+        account.status = "待登录"
+        manager._save_accounts_state()
+        manager.enqueue_login(account)
+        manager.log_event(
+            "info",
+            "graph_reauth",
+            "complete",
+            account.email,
+            "Graph 重新授权成功",
+            {"client_id": session.client_id},
+        )
+
+
+def _poll_graph_reauth_session(session: GraphReauthSession) -> GraphReauthSession:
+    if session.status != "pending":
+        return session
+    now = time.time()
+    if now >= session.expires_at:
+        session.status = "expired"
+        session.message = "授权码已过期，请重新发起 Graph 重新授权"
+        return session
+    if now < session.next_poll_at:
+        return session
+    try:
+        data = _post_form_json(
+            "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+            {
+                "client_id": session.client_id,
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                "device_code": session.device_code,
+            },
+        )
+    except ValueError as exc:
+        text = str(exc)
+        try:
+            payload = json.loads(text)
+        except Exception:
+            payload = {"error_description": text}
+        error_code = str(payload.get("error", "") or "")
+        session.message = str(payload.get("error_description", text) or text)
+        if error_code in {"authorization_pending", "slow_down"}:
+            if error_code == "slow_down":
+                session.interval += 5
+            session.next_poll_at = now + max(1, session.interval)
+            return session
+        session.status = "expired" if error_code == "expired_token" else "failed"
+        return session
+
+    _apply_graph_reauth_success(session, data)
+    session.status = "completed"
+    session.message = "Graph 重新授权成功，已保存新令牌并重新登录"
+    session.next_poll_at = now + max(1, session.interval)
+    return session
 
 
 def resolve_targets(payload: AccountBatchRequest) -> list:
@@ -350,6 +488,71 @@ def update_account(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ok("账号已更新", {"account": account})
+
+
+@app.post("/api/accounts/graph-reauth/start")
+def start_graph_reauth(
+    payload: GraphReauthStartRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    account = manager.find_account(payload.email)
+    if not account:
+        raise HTTPException(status_code=404, detail="邮箱不存在")
+    client_id = account.auth_code_or_client_id.strip()
+    if not client_id:
+        raise HTTPException(status_code=400, detail="当前账号缺少 Client ID，无法发起 Graph 重新授权")
+    try:
+        data = _post_form_json(
+            "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode",
+            {
+                "client_id": client_id,
+                "scope": GRAPH_REAUTH_SCOPE,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"发起 Graph 授权失败: {exc}") from exc
+    session = GraphReauthSession(
+        session_id=uuid4().hex,
+        email=account.email,
+        client_id=client_id,
+        device_code=str(data.get("device_code", "") or ""),
+        user_code=str(data.get("user_code", "") or ""),
+        verification_uri=str(
+            data.get("verification_uri")
+            or data.get("verification_uri_complete")
+            or ""
+        ),
+        expires_at=time.time() + int(data.get("expires_in", 900) or 900),
+        interval=max(3, int(data.get("interval", 5) or 5)),
+        message=str(data.get("message", "") or "请按提示完成微软授权"),
+        next_poll_at=time.time(),
+    )
+    if not session.device_code or not session.user_code or not session.verification_uri:
+        raise HTTPException(status_code=400, detail="微软返回的授权参数不完整")
+    graph_reauth_sessions[session.session_id] = session
+    manager.log_event(
+        "info",
+        "graph_reauth",
+        "start",
+        account.email,
+        "发起 Graph 重新授权",
+        {"client_id": client_id},
+    )
+    return ok("Graph 重新授权已开始", _serialize_graph_reauth_session(session))
+
+
+@app.get("/api/accounts/graph-reauth/status")
+def graph_reauth_status(
+    session_id: str = Query(...),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    session = graph_reauth_sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="授权会话不存在或已过期")
+    session = _poll_graph_reauth_session(session)
+    if session.status in {"completed", "failed", "expired"}:
+        graph_reauth_sessions.pop(session.session_id, None)
+    return ok("ok", _serialize_graph_reauth_session(session))
 
 
 @app.get("/api/settings")

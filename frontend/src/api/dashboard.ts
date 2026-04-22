@@ -143,6 +143,42 @@ export async function updateAccount(payload: {
   return data
 }
 
+export async function startGraphReauth(email: string) {
+  const { data } = await apiClient.post<
+    ApiResponse<{
+      session_id: string
+      email: string
+      client_id: string
+      user_code: string
+      verification_uri: string
+      expires_in: number
+      interval: number
+      status: string
+      message: string
+    }>
+  >('/accounts/graph-reauth/start', { email })
+  return data
+}
+
+export async function getGraphReauthStatus(sessionId: string) {
+  const { data } = await apiClient.get<
+    ApiResponse<{
+      session_id: string
+      email: string
+      client_id: string
+      user_code: string
+      verification_uri: string
+      expires_in: number
+      interval: number
+      status: string
+      message: string
+    }>
+  >('/accounts/graph-reauth/status', {
+    params: { session_id: sessionId },
+  })
+  return data
+}
+
 export async function openMail(localKey: string) {
   const { data } = await apiClient.post<
     ApiResponse<{

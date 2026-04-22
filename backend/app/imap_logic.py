@@ -42,8 +42,18 @@ def decode_text(raw_value: Optional[str]) -> str:
 def parse_email_date(raw_date: str) -> dt.datetime:
     if not raw_date:
         return dt.datetime(1970, 1, 1)
+    text = raw_date.strip()
     try:
-        value = parsedate_to_datetime(raw_date)
+        if "T" in text or text.endswith("Z"):
+            normalized = text.replace("Z", "+00:00")
+            value = dt.datetime.fromisoformat(normalized)
+            if value.tzinfo is not None:
+                return value.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+            return value
+    except Exception:
+        pass
+    try:
+        value = parsedate_to_datetime(text)
         if value.tzinfo is not None:
             return value.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
         return value.replace(tzinfo=ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
@@ -359,9 +369,13 @@ def fetch_mails_via_graph(
             if not remote_id:
                 continue
             local_key = f"{account.email}|graph|{folder_id}|{remote_id}"
+            received_at = str(message_item.get("receivedDateTime", "")).strip()
+            date_value = parse_email_date(received_at)
             if local_key in existing_by_key:
                 existing_item = existing_by_key[local_key]
                 existing_item.folder = folder_name
+                existing_item.date_value = date_value
+                existing_item.date_text = format_shanghai_time(date_value)
                 if local_read_keys and local_key in local_read_keys:
                     existing_item.is_unread = False
                 else:
@@ -379,8 +393,6 @@ def fetch_mails_via_graph(
                         or email_address.get("address")
                         or ""
                     )
-            received_at = str(message_item.get("receivedDateTime", "")).strip()
-            date_value = parse_email_date(received_at.replace("T", " ").replace("Z", " +0000"))
             is_unread = not bool(message_item.get("isRead", False))
             if local_read_keys and local_key in local_read_keys:
                 is_unread = False

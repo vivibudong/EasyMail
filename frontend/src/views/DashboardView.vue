@@ -155,7 +155,12 @@
                     详情
                   </button>
                 </div>
-                <div v-else class="mt-1 truncate">状态：{{ selectedAccount?.status || '-' }}</div>
+                <div class="mt-1 truncate text-[11px] text-gray-500 dark:text-dark-400">
+                  认证：{{ selectedAccount?.auth_method || '-' }}
+                </div>
+                <div v-if="!selectedAccount?.last_error_summary" class="mt-1 truncate">
+                  状态：{{ selectedAccount?.status || '-' }}
+                </div>
               </div>
 
               <div ref="accountListRef" class="pane-scroll overflow-hidden">
@@ -397,6 +402,7 @@
           <button class="dropdown-item w-full" @click="openEditAccountFromMenu">编辑账号</button>
           <button class="dropdown-item w-full" @click="runSingleReceive(contextMenu.email)">收件</button>
           <button class="dropdown-item w-full" @click="runSingleRelogin(contextMenu.email)">重新登录</button>
+          <button class="dropdown-item w-full" @click="openGraphReauthFromMenu">Graph 重新授权</button>
           <div
             class="relative"
             @mouseenter="contextSubmenuOpen = true"
@@ -751,6 +757,53 @@
           </div>
         </div>
       </transition>
+
+      <transition name="modal">
+        <div v-if="graphReauthDialog.open" class="modal-overlay" @click.self="closeGraphReauthDialog">
+          <div class="modal-content max-w-xl">
+            <div class="modal-header">
+              <div class="modal-title">Graph 重新授权</div>
+              <button class="btn btn-secondary btn-sm px-2 py-1" @click="closeGraphReauthDialog">关闭</button>
+            </div>
+            <div class="modal-body space-y-4">
+              <div class="text-sm text-gray-600 dark:text-dark-300">
+                当前账号：{{ graphReauthDialog.email || '-' }}
+              </div>
+              <div
+                v-if="graphReauthDialog.user_code"
+                class="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-dark-700 dark:bg-dark-800/70"
+              >
+                <div class="text-xs text-gray-500 dark:text-dark-400">微软验证码</div>
+                <div class="mt-1 text-2xl font-semibold tracking-[0.25em] text-gray-900 dark:text-white">
+                  {{ graphReauthDialog.user_code }}
+                </div>
+                <div class="mt-3 text-xs text-gray-500 dark:text-dark-400 break-all">
+                  {{ graphReauthDialog.verification_uri }}
+                </div>
+              </div>
+              <div class="text-sm text-gray-600 dark:text-dark-300">
+                {{ graphReauthDialog.message || '请按提示完成微软授权。' }}
+              </div>
+              <div class="text-xs text-gray-500 dark:text-dark-400">
+                状态：{{ graphReauthStatusLabel }} · 剩余 {{ graphReauthDialog.expires_in }} 秒
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-secondary" @click="copyGraphUserCode">复制验证码</button>
+              <a
+                v-if="graphReauthDialog.verification_uri"
+                class="btn btn-secondary"
+                :href="graphReauthDialog.verification_uri"
+                target="_blank"
+                rel="noreferrer"
+              >
+                打开微软授权页
+              </a>
+              <button class="btn btn-primary" @click="pollGraphReauth(true)">立即检查结果</button>
+            </div>
+          </div>
+        </div>
+      </transition>
     </div>
   </AppLayout>
 </template>
@@ -769,6 +822,7 @@ import {
   getAccountDetail,
   getBodyStatus,
   getDashboardState,
+  getGraphReauthStatus,
   getTokenRefreshHistory,
   importAccounts,
   openMail,
@@ -778,6 +832,7 @@ import {
   runTokenRefresh,
   saveSettings,
   setAccountTags,
+  startGraphReauth,
   toggleMailStar,
   updateAccount,
   updateGroup,
@@ -835,6 +890,17 @@ const importMode = ref<'text' | 'file'>('text')
 const importText = ref('')
 const selectedImportFile = ref<File | null>(null)
 const selectedImportFileName = ref('')
+const graphReauthDialog = ref({
+  open: false,
+  email: '',
+  session_id: '',
+  user_code: '',
+  verification_uri: '',
+  expires_in: 0,
+  interval: 5,
+  status: 'pending',
+  message: '',
+})
 const accountPage = ref(1)
 const mailPage = ref(1)
 const accountPageSize = ref(10)
@@ -926,6 +992,7 @@ const flagOptions = [
 
 let refreshTimer: number | null = null
 let bodyTimer: number | null = null
+let graphReauthTimer: number | null = null
 let accountResizeObserver: ResizeObserver | null = null
 let mailResizeObserver: ResizeObserver | null = null
 let handleWindowResize: (() => void) | null = null
@@ -1151,6 +1218,13 @@ const bodyStatusText = computed(() => {
   return task.status || '等待任务'
 })
 
+const graphReauthStatusLabel = computed(() => {
+  if (graphReauthDialog.value.status === 'completed') return '已完成'
+  if (graphReauthDialog.value.status === 'failed') return '失败'
+  if (graphReauthDialog.value.status === 'expired') return '已过期'
+  return '等待授权'
+})
+
 watch(
   () => groupOptions.value.map((group) => group.key),
   (keys) => {
@@ -1229,6 +1303,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   if (refreshTimer) window.clearInterval(refreshTimer)
   stopBodyPolling()
+  stopGraphReauthPolling()
   document.removeEventListener('click', closeContextMenu)
   accountResizeObserver?.disconnect()
   mailResizeObserver?.disconnect()
@@ -1370,6 +1445,85 @@ function triggerImport() {
   importText.value = ''
   selectedImportFile.value = null
   selectedImportFileName.value = ''
+}
+
+function stopGraphReauthPolling() {
+  if (graphReauthTimer) {
+    window.clearInterval(graphReauthTimer)
+    graphReauthTimer = null
+  }
+}
+
+function closeGraphReauthDialog() {
+  graphReauthDialog.value.open = false
+  stopGraphReauthPolling()
+}
+
+async function copyGraphUserCode() {
+  const code = graphReauthDialog.value.user_code
+  if (!code) return
+  try {
+    await navigator.clipboard.writeText(code)
+    showSuccess(`已复制验证码: ${code}`)
+  } catch {
+    showError('复制验证码失败')
+  }
+}
+
+async function openGraphReauthFromMenu() {
+  const email = contextMenu.value.email
+  closeContextMenu()
+  try {
+    const response = await startGraphReauth(email)
+    graphReauthDialog.value = {
+      open: true,
+      email: response.data.email,
+      session_id: response.data.session_id,
+      user_code: response.data.user_code,
+      verification_uri: response.data.verification_uri,
+      expires_in: response.data.expires_in,
+      interval: response.data.interval,
+      status: response.data.status,
+      message: response.data.message,
+    }
+    stopGraphReauthPolling()
+    graphReauthTimer = window.setInterval(() => {
+      pollGraphReauth()
+    }, Math.max(3000, response.data.interval * 1000))
+  } catch (error: any) {
+    showError(error?.response?.data?.detail || 'Graph 重新授权启动失败')
+  }
+}
+
+async function pollGraphReauth(manual = false) {
+  const sessionId = graphReauthDialog.value.session_id
+  if (!sessionId) return
+  try {
+    const response = await getGraphReauthStatus(sessionId)
+    graphReauthDialog.value = {
+      ...graphReauthDialog.value,
+      ...response.data,
+      open: true,
+    }
+    if (response.data.status === 'completed') {
+      stopGraphReauthPolling()
+      showSuccess(response.data.message || 'Graph 重新授权成功')
+      await refreshState(true)
+      return
+    }
+    if (response.data.status === 'failed' || response.data.status === 'expired') {
+      stopGraphReauthPolling()
+      showError(response.data.message || 'Graph 重新授权失败')
+      return
+    }
+    if (manual) {
+      showSuccess(response.data.message || '授权尚未完成，请继续在微软页面操作')
+    }
+  } catch (error: any) {
+    if (manual) {
+      showError(error?.response?.data?.detail || 'Graph 授权状态检查失败')
+    }
+  }
 }
 
 async function openTaskCenter() {
