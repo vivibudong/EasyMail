@@ -181,18 +181,18 @@ def parse_text_to_accounts(
 def get_access_token_by_refresh_token(
     refresh_token: str,
     client_id: str,
-    scope: str = OAUTH_SCOPE,
+    scope: Optional[str] = OAUTH_SCOPE,
     tenant: str = "consumers",
-) -> tuple[Optional[str], int, str, str]:
+) -> tuple[Optional[str], int, str, str, str]:
     token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
-    body = urlencode(
-        {
-            "client_id": client_id,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "scope": scope,
-        }
-    ).encode("utf-8")
+    payload = {
+        "client_id": client_id,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    }
+    if scope:
+        payload["scope"] = scope
+    body = urlencode(payload).encode("utf-8")
     request = Request(token_url, data=body, method="POST")
     request.add_header("Content-Type", "application/x-www-form-urlencoded")
     try:
@@ -202,11 +202,18 @@ def get_access_token_by_refresh_token(
         access_token = data.get("access_token", "")
         expires_in = int(data.get("expires_in", 3600))
         next_refresh_token = str(data.get("refresh_token", "") or "")
+        granted_scope = str(data.get("scope", "") or "")
         if access_token:
-            return access_token, expires_in, "refresh_token换取access_token成功", next_refresh_token
-        return None, 0, f"token接口无access_token: {raw[:220]}", ""
+            return (
+                access_token,
+                expires_in,
+                "refresh_token换取access_token成功",
+                next_refresh_token,
+                granted_scope,
+            )
+        return None, 0, f"token接口无access_token: {raw[:220]}", "", ""
     except Exception as exc:
-        return None, 0, str(exc), ""
+        return None, 0, str(exc), "", ""
 
 
 def get_oauth_access_token(account: MailAccount) -> tuple[Optional[str], str]:
@@ -219,7 +226,7 @@ def get_oauth_access_token(account: MailAccount) -> tuple[Optional[str], str]:
         return None, "缺少第4段令牌"
     if not client_id:
         return None, "缺少第3段ClientID"
-    access_token, expires_in, message, next_refresh_token = get_access_token_by_refresh_token(
+    access_token, expires_in, message, next_refresh_token, _ = get_access_token_by_refresh_token(
         token,
         client_id,
         scope=OAUTH_SCOPE,
@@ -243,18 +250,30 @@ def get_graph_access_token(account: MailAccount) -> tuple[Optional[str], str]:
         return None, "缺少第4段令牌"
     if not client_id:
         return None, "缺少第3段ClientID"
-    access_token, expires_in, message, next_refresh_token = get_access_token_by_refresh_token(
-        token,
-        client_id,
-        scope=GRAPH_SCOPE,
-    )
-    if access_token:
-        account.cached_graph_access_token = access_token
-        account.cached_graph_access_expire_at = now + max(300, expires_in)
-        if next_refresh_token:
-            account.token = next_refresh_token
-        return access_token, "Graph刷新令牌"
-    return None, message
+    refresh_plans = [
+        (None, "Graph刷新令牌(继承原始授权)"),
+        (GRAPH_SCOPE, "Graph刷新令牌(显式作用域)"),
+    ]
+    errors: list[str] = []
+    for scope, label in refresh_plans:
+        access_token, expires_in, message, next_refresh_token, granted_scope = (
+            get_access_token_by_refresh_token(
+                token,
+                client_id,
+                scope=scope,
+            )
+        )
+        if access_token:
+            account.cached_graph_access_token = access_token
+            account.cached_graph_access_expire_at = now + max(300, expires_in)
+            if next_refresh_token:
+                account.token = next_refresh_token
+            detail = f"{label}成功"
+            if granted_scope:
+                detail = f"{detail}: {granted_scope}"
+            return access_token, detail
+        errors.append(f"{label}: {message}")
+    return None, "；".join(errors)
 
 
 def _is_outlook_graph_candidate(account: MailAccount) -> bool:
@@ -275,8 +294,9 @@ def _graph_request_json(
     access_token: str,
     timeout: int = 20,
 ) -> tuple[Optional[dict], str]:
+    normalized_path = path.replace(" ", "%20")
     request = Request(
-        f"{GRAPH_BASE_URL}{path}",
+        f"{GRAPH_BASE_URL}{normalized_path}",
         method="GET",
     )
     request.add_header("Authorization", f"Bearer {access_token}")

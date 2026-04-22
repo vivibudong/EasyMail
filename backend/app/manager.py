@@ -156,6 +156,10 @@ class MailManager:
             parts.append("基础认证已被微软禁用，请改用 OAuth2")
         if "invalid_grant" in text.lower() or "bad request" in text.lower():
             parts.append("刷新令牌可能已失效，需要重新授权")
+        if "AADSTS70000" in text and "scope" in text.lower():
+            parts.append("当前令牌未授予所请求的权限范围")
+        if "AADSTS70011" in text:
+            parts.append("请求的权限范围参数无效")
         if "缺少第4段令牌" in text:
             parts.append("缺少刷新令牌")
         if "缺少第3段ClientID" in text:
