@@ -65,8 +65,11 @@ class TagDefinition:
 @dataclass
 class AppSettings:
     auto_receive_interval: int = 120
-    txt_delimiter_preset: str = "dash3"
-    txt_delimiter_regex: str = r"-{3,}"
+    txt_delimiter_preset: str = "auto"
+    txt_delimiter_regex: str = r"\s*(?:-{3,}|\|\||\||,|;|\t)\s*"
+    import_delimiters: list[str] = field(
+        default_factory=lambda: [r"-{3,}", r"\|\|", r"\|", r",", r";", r"\t"]
+    )
     txt_comment_prefix: str = "#"
     txt_skip_first_line: bool = False
     startup_auto_login: bool = True
@@ -195,6 +198,7 @@ def settings_to_dict(settings: AppSettings) -> dict:
         "auto_receive_interval": settings.auto_receive_interval,
         "txt_delimiter_preset": settings.txt_delimiter_preset,
         "txt_delimiter_regex": settings.txt_delimiter_regex,
+        "import_delimiters": settings.import_delimiters,
         "txt_comment_prefix": settings.txt_comment_prefix,
         "txt_skip_first_line": settings.txt_skip_first_line,
         "startup_auto_login": settings.startup_auto_login,
@@ -258,8 +262,13 @@ def settings_from_dict(data: dict) -> AppSettings:
 
     return AppSettings(
         auto_receive_interval=int(data.get("auto_receive_interval", 120) or 120),
-        txt_delimiter_preset=str(data.get("txt_delimiter_preset", "dash3")),
-        txt_delimiter_regex=str(data.get("txt_delimiter_regex", r"-{3,}")),
+        txt_delimiter_preset=str(data.get("txt_delimiter_preset", "auto")),
+        txt_delimiter_regex=str(data.get("txt_delimiter_regex", r"\s*(?:-{3,}|\|\||\||,|;|\t)\s*")),
+        import_delimiters=[
+            str(item).strip()
+            for item in data.get("import_delimiters", [r"-{3,}", r"\|\|", r"\|", r",", r";", r"\t"])
+            if str(item).strip()
+        ],
         txt_comment_prefix=str(data.get("txt_comment_prefix", "#")),
         txt_skip_first_line=bool(data.get("txt_skip_first_line", False)),
         startup_auto_login=bool(data.get("startup_auto_login", True)),

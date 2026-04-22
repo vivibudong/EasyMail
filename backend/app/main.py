@@ -105,6 +105,7 @@ class SettingsRequest(BaseModel):
     auto_receive_interval: int = 120
     txt_delimiter_preset: str = "dash3"
     txt_delimiter_regex: str = r"-{3,}"
+    import_delimiters: list[str] = Field(default_factory=lambda: [r"-{3,}", r"\|\|", r"\|", r",", r";", r"\t"])
     txt_comment_prefix: str = "#"
     txt_skip_first_line: bool = False
     startup_auto_login: bool = True

@@ -98,6 +98,54 @@ def parse_line_to_account(
     )
 
 
+def parse_text_to_accounts(
+    content: str,
+    *,
+    delimiter_regex: str,
+    delimiter_preset: str,
+    import_delimiters: list[str],
+    comment_prefix: str,
+    skip_first_line: bool,
+) -> list[MailAccount]:
+    lines = content.splitlines()
+    if skip_first_line and lines:
+        lines = lines[1:]
+
+    presets = [delimiter_regex.strip() or r"\s*(?:-{3,}|\|\||\||,|;|\t)\s*"]
+    for delimiter in import_delimiters:
+        delimiter = delimiter.strip()
+        if not delimiter:
+            continue
+        presets.append(rf"\s*(?:{delimiter})\s*")
+    presets.extend(
+        [
+            r"\s*(?:-{3,})\s*",
+            r"\s*\|\|\s*",
+            r"\s*\|\s*",
+            r"\s*,\s*",
+            r"\s*;\s*",
+            r"\s+\|\|\s+",
+        ]
+    )
+    if delimiter_preset != "auto":
+        presets = [presets[0]]
+
+    best_items: list[MailAccount] = []
+    for regex in presets:
+        try:
+            re.compile(regex)
+        except re.error:
+            continue
+        parsed_items: list[MailAccount] = []
+        for line in lines:
+            item = parse_line_to_account(line, regex, comment_prefix)
+            if item:
+                parsed_items.append(item)
+        if len(parsed_items) > len(best_items):
+            best_items = parsed_items
+    return best_items
+
+
 def get_access_token_by_refresh_token(
     refresh_token: str,
     client_id: str,

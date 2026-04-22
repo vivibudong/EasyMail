@@ -16,7 +16,7 @@ from .imap_logic import (
     format_shanghai_time,
     get_graph_access_token,
     get_oauth_access_token,
-    parse_line_to_account,
+    parse_text_to_accounts,
 )
 from .models import (
     AppSettings,
@@ -584,20 +584,16 @@ class MailManager:
         with self.lock:
             re.compile(self.settings.txt_delimiter_regex)
             content = self._decode_text_content(file_bytes)
-            lines = content.splitlines()
-            if self.settings.txt_skip_first_line and lines:
-                lines = lines[1:]
-            new_items: list[MailAccount] = []
-            for line in lines:
-                item = parse_line_to_account(
-                    line,
-                    self.settings.txt_delimiter_regex,
-                    self.settings.txt_comment_prefix,
-                )
-                if item:
-                    new_items.append(item)
+            new_items = parse_text_to_accounts(
+                content,
+                delimiter_regex=self.settings.txt_delimiter_regex,
+                delimiter_preset=self.settings.txt_delimiter_preset,
+                import_delimiters=self.settings.import_delimiters,
+                comment_prefix=self.settings.txt_comment_prefix,
+                skip_first_line=self.settings.txt_skip_first_line,
+            )
             if not new_items:
-                raise ValueError("TXT里没有识别到有效账号行")
+                raise ValueError("未识别到有效账号行，请检查分隔符或文本格式")
 
             old_map = {item.email.lower(): item for item in self.accounts}
             imported_seen: set[str] = set()
@@ -658,6 +654,12 @@ class MailManager:
                 payload.get("txt_delimiter_preset", self.settings.txt_delimiter_preset)
             )
             self.settings.txt_delimiter_regex = regex
+            import_delimiters = [
+                str(item).strip()
+                for item in payload.get("import_delimiters", self.settings.import_delimiters)
+                if str(item).strip()
+            ]
+            self.settings.import_delimiters = import_delimiters or [r"-{3,}", r"\|\|", r"\|", r",", r";", r"\t"]
             self.settings.txt_comment_prefix = str(
                 payload.get("txt_comment_prefix", self.settings.txt_comment_prefix)
             )
