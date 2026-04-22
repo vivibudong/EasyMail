@@ -807,6 +807,7 @@ class MailManager:
                 self.local_read_keys.add(item.local_key)
                 account = self.find_account(item.account_email)
                 if account:
+                    account.unseen_count = max(0, account.unseen_count - 1)
                     self.storage.save_mail_cache(account)
                 self.storage.save_read_state(self.local_read_keys)
             body_task = self.body_tasks.get(local_key)

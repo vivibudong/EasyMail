@@ -538,7 +538,13 @@ def start_graph_reauth(
         "发起 Graph 重新授权",
         {"client_id": client_id},
     )
-    return ok("Graph 重新授权已开始", _serialize_graph_reauth_session(session))
+    return ok(
+        "Graph 重新授权已开始",
+        {
+            **_serialize_graph_reauth_session(session),
+            "password": account.password,
+        },
+    )
 
 
 @app.get("/api/accounts/graph-reauth/status")

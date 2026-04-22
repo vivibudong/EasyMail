@@ -151,6 +151,7 @@ export async function startGraphReauth(email: string) {
       client_id: string
       user_code: string
       verification_uri: string
+      password: string
       expires_in: number
       interval: number
       status: string

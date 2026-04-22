@@ -192,7 +192,7 @@
                       <span>·</span>
                       <span>{{ account.status }}</span>
                       <span v-if="account.unseen_count > 0" class="badge badge-primary px-2 py-0">
-                        {{ account.unseen_count }}
+                        未读 {{ account.unseen_count }}
                       </span>
                     </div>
                     <div v-if="visibleAccountTags(account).length" class="mt-1 flex flex-wrap gap-1">
@@ -773,6 +773,22 @@
                 v-if="graphReauthDialog.user_code"
                 class="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-dark-700 dark:bg-dark-800/70"
               >
+                <div class="mb-3 grid gap-3 md:grid-cols-2">
+                  <div class="rounded-xl border border-gray-200 bg-white px-3 py-2 dark:border-dark-700 dark:bg-dark-900/40">
+                    <div class="text-[11px] text-gray-500 dark:text-dark-400">当前账号</div>
+                    <div class="mt-1 break-all text-sm font-medium text-gray-900 dark:text-white">
+                      {{ graphReauthDialog.email }}
+                    </div>
+                    <button class="mt-2 btn btn-secondary btn-sm px-2 py-1" @click="copyGraphField(graphReauthDialog.email, '账号')">复制账号</button>
+                  </div>
+                  <div class="rounded-xl border border-gray-200 bg-white px-3 py-2 dark:border-dark-700 dark:bg-dark-900/40">
+                    <div class="text-[11px] text-gray-500 dark:text-dark-400">当前密码</div>
+                    <div class="mt-1 break-all text-sm font-medium text-gray-900 dark:text-white">
+                      {{ graphReauthDialog.password || '-' }}
+                    </div>
+                    <button class="mt-2 btn btn-secondary btn-sm px-2 py-1" @click="copyGraphField(graphReauthDialog.password, '密码')">复制密码</button>
+                  </div>
+                </div>
                 <div class="text-xs text-gray-500 dark:text-dark-400">微软验证码</div>
                 <div class="mt-1 text-2xl font-semibold tracking-[0.25em] text-gray-900 dark:text-white">
                   {{ graphReauthDialog.user_code }}
@@ -789,7 +805,7 @@
               </div>
             </div>
             <div class="modal-footer">
-              <button class="btn btn-secondary" @click="copyGraphUserCode">复制验证码</button>
+              <button class="btn btn-secondary" @click="copyGraphField(graphReauthDialog.user_code, '验证码')">复制验证码</button>
               <a
                 v-if="graphReauthDialog.verification_uri"
                 class="btn btn-secondary"
@@ -900,6 +916,7 @@ const graphReauthDialog = ref({
   interval: 5,
   status: 'pending',
   message: '',
+  password: '',
 })
 const accountPage = ref(1)
 const mailPage = ref(1)
@@ -1459,14 +1476,13 @@ function closeGraphReauthDialog() {
   stopGraphReauthPolling()
 }
 
-async function copyGraphUserCode() {
-  const code = graphReauthDialog.value.user_code
-  if (!code) return
+async function copyGraphField(value: string, label: string) {
+  if (!value) return
   try {
-    await navigator.clipboard.writeText(code)
-    showSuccess(`已复制验证码: ${code}`)
+    await navigator.clipboard.writeText(value)
+    showSuccess(`已复制${label}: ${value}`)
   } catch {
-    showError('复制验证码失败')
+    showError(`复制${label}失败`)
   }
 }
 
@@ -1485,6 +1501,7 @@ async function openGraphReauthFromMenu() {
       interval: response.data.interval,
       status: response.data.status,
       message: response.data.message,
+      password: response.data.password,
     }
     stopGraphReauthPolling()
     graphReauthTimer = window.setInterval(() => {
@@ -1695,12 +1712,21 @@ async function filterAllMails() {
   selectedAccountEmail.value = null
 }
 
+function computeContextMenuY(eventY: number, estimatedHeight: number) {
+  const margin = 16
+  const maxTop = window.innerHeight - estimatedHeight - margin
+  if (eventY <= maxTop) {
+    return Math.max(margin, eventY)
+  }
+  return Math.max(margin, eventY - estimatedHeight + 36)
+}
+
 function openGroupContextMenu(event: MouseEvent, group: GroupOption) {
   if (group.key === '__all__' || group.key === '__starred__' || group.key === '未分组') return
   contextMenu.value = {
     visible: true,
     x: Math.min(event.clientX, window.innerWidth - 280),
-    y: Math.min(event.clientY, window.innerHeight - 260),
+    y: computeContextMenuY(event.clientY, 180),
     kind: 'group',
     email: '',
     name: group.key,
@@ -1712,7 +1738,7 @@ function openTagContextMenu(event: MouseEvent, tag: TagOption) {
   contextMenu.value = {
     visible: true,
     x: Math.min(event.clientX, window.innerWidth - 280),
-    y: Math.min(event.clientY, window.innerHeight - 260),
+    y: computeContextMenuY(event.clientY, 180),
     kind: 'tag',
     email: '',
     name: tag.key,
@@ -1844,7 +1870,7 @@ function openContextMenu(event: MouseEvent, email: string) {
   contextMenu.value = {
     visible: true,
     x: Math.min(event.clientX, window.innerWidth - 280),
-    y: Math.min(event.clientY, window.innerHeight - 420),
+    y: computeContextMenuY(event.clientY, 430),
     kind: 'account',
     email,
     name: '',
