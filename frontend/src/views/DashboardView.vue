@@ -9,7 +9,7 @@
     @show-account-detail="handleShowAccountDetail"
     @open-task-center="openTaskCenter"
   >
-    <div class="h-[calc(100vh-74px)]">
+    <div class="h-[calc(100vh-74px)] min-h-[calc(100vh-74px)]">
       <section class="card flex h-full flex-col overflow-hidden">
         <div class="card-header flex flex-wrap items-center gap-2 px-4 py-3">
           <button class="btn btn-secondary btn-sm" @click="triggerImport">导入账号</button>
@@ -24,7 +24,7 @@
             删除勾选
           </button>
           <button class="btn btn-secondary btn-sm" @click="handleExportAccounts">导出邮箱</button>
-          <div class="min-w-[220px] flex-1">
+          <div class="min-w-0 basis-full sm:basis-auto sm:min-w-[220px] flex-1">
             <div class="flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-dark-400">
               <span>当前分组：{{ selectedGroupLabel }}</span>
               <span>当前邮箱：{{ selectedAccountEmail || '全部邮箱' }}</span>
@@ -36,7 +36,7 @@
           </div>
           <input
             v-model="searchTerm"
-            class="input min-w-[180px] max-w-[240px] py-2 text-xs"
+            class="input w-full sm:min-w-[180px] sm:max-w-[240px] py-2 text-xs"
             type="text"
             placeholder="全局搜索邮箱 / 主题 / 发件人"
           />
@@ -44,7 +44,7 @@
           <input ref="fileInput" class="hidden" type="file" accept=".txt" @change="handleImportFile" />
         </div>
 
-        <div class="card-body flex-1 overflow-hidden p-0">
+        <div class="card-body flex-1 overflow-x-auto overflow-y-hidden p-0">
           <div class="mail-workbench">
             <aside class="mail-pane border-r border-gray-100 dark:border-dark-800">
               <div class="pane-scroll space-y-3 py-2">

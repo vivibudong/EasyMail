@@ -728,7 +728,7 @@
 
   /* ============ Mail Workbench ============ */
   .mail-workbench {
-    @apply grid h-full min-h-0 grid-cols-1 xl:grid-cols-[124px_292px_352px_minmax(0,1fr)];
+    @apply grid h-full min-h-0 min-w-[1180px] grid-cols-[124px_292px_352px_minmax(320px,1fr)];
   }
 
   .mail-pane {
