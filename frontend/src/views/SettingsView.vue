@@ -13,6 +13,7 @@
           <label class="space-y-2">
             <span class="input-label mb-0">TXT 分隔模板</span>
             <select v-model="form.txt_delimiter_preset" class="input" @change="onPresetChange">
+              <option value="auto">auto</option>
               <option value="dash3">dash3</option>
               <option value="comma">comma</option>
               <option value="pipe">pipe</option>
@@ -34,6 +35,29 @@
             <span class="input-label mb-0">邮件显示上限</span>
             <input v-model.number="form.mail_list_limit" class="input" type="number" min="0" />
           </label>
+
+          <div class="space-y-2 md:col-span-2">
+            <span class="input-label mb-0">邮箱导入分隔符</span>
+            <div class="rounded-xl border border-gray-200 p-3 dark:border-dark-700">
+              <div class="mb-3 flex flex-wrap gap-2">
+                <span
+                  v-for="(item, index) in form.import_delimiters"
+                  :key="`${item}-${index}`"
+                  class="inline-flex items-center gap-2 rounded-full bg-sky-50 px-3 py-1 text-xs text-sky-700 dark:bg-sky-900/20 dark:text-sky-300"
+                >
+                  {{ item }}
+                  <button class="text-sky-500 hover:text-sky-700" @click="removeDelimiter(index)">×</button>
+                </span>
+              </div>
+              <div class="flex gap-2">
+                <input v-model="newDelimiter" class="input" type="text" placeholder="例如：\\|\\| 或 ;" />
+                <button class="btn btn-secondary" @click="addDelimiter">添加</button>
+              </div>
+              <p class="mt-2 text-xs text-gray-500 dark:text-dark-400">
+                导入时会自动尝试这些分隔符，并自动忽略分隔符前后的空格。
+              </p>
+            </div>
+          </div>
         </div>
 
         <div class="card-footer flex flex-wrap gap-3">
@@ -89,8 +113,9 @@ import type { AppSettings } from '@/types'
 
 const form = reactive<AppSettings>({
   auto_receive_interval: 120,
-  txt_delimiter_preset: 'dash3',
-  txt_delimiter_regex: '-{3,}',
+  txt_delimiter_preset: 'auto',
+  txt_delimiter_regex: '\\s*(?:-{3,}|\\|\\||\\||,|;|\\t)\\s*',
+  import_delimiters: ['-{3,}', '\\|\\|', '\\|', ',', ';', '\\t'],
   txt_comment_prefix: '#',
   txt_skip_first_line: false,
   startup_auto_login: true,
@@ -109,6 +134,7 @@ const form = reactive<AppSettings>({
 })
 
 const saving = ref(false)
+const newDelimiter = ref('')
 const toastStore = useToastStore()
 
 onMounted(async () => {
@@ -118,6 +144,7 @@ onMounted(async () => {
 
 function onPresetChange() {
   const mapping: Record<string, string> = {
+    auto: '\\s*(?:-{3,}|\\|\\||\\||,|;|\\t)\\s*',
     dash3: '-{3,}',
     comma: ',',
     pipe: '\\|',
@@ -125,6 +152,19 @@ function onPresetChange() {
   if (mapping[form.txt_delimiter_preset]) {
     form.txt_delimiter_regex = mapping[form.txt_delimiter_preset]
   }
+}
+
+function addDelimiter() {
+  const value = newDelimiter.value.trim()
+  if (!value) return
+  if (!form.import_delimiters.includes(value)) {
+    form.import_delimiters.push(value)
+  }
+  newDelimiter.value = ''
+}
+
+function removeDelimiter(index: number) {
+  form.import_delimiters.splice(index, 1)
 }
 
 async function handleSave() {

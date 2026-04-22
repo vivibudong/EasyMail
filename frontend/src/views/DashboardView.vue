@@ -716,6 +716,41 @@
           </div>
         </div>
       </transition>
+
+      <transition name="modal">
+        <div v-if="importDialogOpen" class="modal-overlay" @click.self="importDialogOpen = false">
+          <div class="modal-content max-w-2xl">
+            <div class="modal-header">
+              <div class="modal-title">导入账号</div>
+              <button class="btn btn-secondary btn-sm px-2 py-1" @click="importDialogOpen = false">关闭</button>
+            </div>
+            <div class="modal-body space-y-4">
+              <div class="tabs">
+                <button class="tab" :class="{ 'tab-active': importMode === 'text' }" @click="importMode = 'text'">粘贴文本</button>
+                <button class="tab" :class="{ 'tab-active': importMode === 'file' }" @click="importMode = 'file'">选择文件</button>
+              </div>
+
+              <div v-if="importMode === 'text'" class="space-y-2">
+                <textarea
+                  v-model="importText"
+                  class="input min-h-64 font-mono text-xs"
+                  placeholder="每行一个账号，例如：email || password || client_id || refresh_token"
+                ></textarea>
+              </div>
+
+              <div v-else class="space-y-3">
+                <button class="btn btn-secondary" @click="fileInput?.click()">选择 TXT 文件</button>
+                <div class="text-sm text-gray-500 dark:text-dark-400">
+                  {{ selectedImportFileName || '尚未选择文件' }}
+                </div>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-primary" @click="submitImport">开始导入</button>
+            </div>
+          </div>
+        </div>
+      </transition>
     </div>
   </AppLayout>
 </template>
@@ -793,7 +828,13 @@ const detailDialog = ref<{ title: string; body: string } | null>(null)
 const groupSectionOpen = ref(true)
 const tagSectionOpen = ref(true)
 const taskCenterOpen = ref(false)
+const taskSettingsDirty = ref(false)
 const editAccountOpen = ref(false)
+const importDialogOpen = ref(false)
+const importMode = ref<'text' | 'file'>('text')
+const importText = ref('')
+const selectedImportFile = ref<File | null>(null)
+const selectedImportFileName = ref('')
 const accountPage = ref(1)
 const mailPage = ref(1)
 const accountPageSize = ref(10)
@@ -1154,6 +1195,16 @@ watch(
   },
 )
 
+watch(
+  taskSettings,
+  () => {
+    if (taskCenterOpen.value) {
+      taskSettingsDirty.value = true
+    }
+  },
+  { deep: true },
+)
+
 watch(totalAccountPages, (value) => {
   if (accountPage.value > value) {
     accountPage.value = value
@@ -1213,15 +1264,17 @@ async function refreshState(silent = false) {
   try {
     const response = await getDashboardState()
     dashboard.value = response.data
-    taskSettings.value = {
-      token_refresh_enabled: response.data.settings.token_refresh_enabled,
-      token_refresh_interval_minutes: response.data.settings.token_refresh_interval_minutes,
-      auto_receive_enabled: response.data.settings.auto_receive_enabled,
-      auto_receive_interval_minutes: response.data.settings.auto_receive_interval_minutes,
-      backup_enabled: response.data.settings.backup_enabled,
-      backup_interval_minutes: response.data.settings.backup_interval_minutes,
-      backup_directory: response.data.settings.backup_directory,
-      backup_keep_count: response.data.settings.backup_keep_count,
+    if (!taskCenterOpen.value || !taskSettingsDirty.value) {
+      taskSettings.value = {
+        token_refresh_enabled: response.data.settings.token_refresh_enabled,
+        token_refresh_interval_minutes: response.data.settings.token_refresh_interval_minutes,
+        auto_receive_enabled: response.data.settings.auto_receive_enabled,
+        auto_receive_interval_minutes: response.data.settings.auto_receive_interval_minutes,
+        backup_enabled: response.data.settings.backup_enabled,
+        backup_interval_minutes: response.data.settings.backup_interval_minutes,
+        backup_directory: response.data.settings.backup_directory,
+        backup_keep_count: response.data.settings.backup_keep_count,
+      }
     }
     if (selectedMailKey.value) {
       const current = response.data.mails.find((item) => item.local_key === selectedMailKey.value)
@@ -1312,11 +1365,16 @@ function openAccountDetail(account: MailAccountSummary) {
 }
 
 function triggerImport() {
-  fileInput.value?.click()
+  importDialogOpen.value = true
+  importMode.value = 'text'
+  importText.value = ''
+  selectedImportFile.value = null
+  selectedImportFileName.value = ''
 }
 
 async function openTaskCenter() {
   taskCenterOpen.value = true
+  taskSettingsDirty.value = false
   await loadTokenRefreshHistory()
 }
 
@@ -1347,6 +1405,7 @@ async function saveTaskCenterSettings() {
       backup_directory: response.data.backup_directory,
       backup_keep_count: response.data.backup_keep_count,
     }
+    taskSettingsDirty.value = false
     showSuccess(response.message)
   } catch (error: any) {
     showError(error?.response?.data?.detail || '保存任务设置失败')
@@ -1377,14 +1436,34 @@ async function handleImportFile(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file) return
+  selectedImportFile.value = file
+  selectedImportFileName.value = file.name
+  importMode.value = 'file'
+  input.value = ''
+}
+
+async function submitImport() {
   try {
-    const response = await importAccounts(file)
+    let payloadFile: File | null = null
+    if (importMode.value === 'text') {
+      if (!importText.value.trim()) {
+        showError('请输入账号文本')
+        return
+      }
+      payloadFile = new File([importText.value], 'accounts.txt', { type: 'text/plain' })
+    } else {
+      payloadFile = selectedImportFile.value
+      if (!payloadFile) {
+        showError('请选择 TXT 文件')
+        return
+      }
+    }
+    const response = await importAccounts(payloadFile)
     showSuccess(response.message)
+    importDialogOpen.value = false
     await refreshState(true)
   } catch (error: any) {
     showError(error?.response?.data?.detail || '导入失败')
-  } finally {
-    input.value = ''
   }
 }
 
