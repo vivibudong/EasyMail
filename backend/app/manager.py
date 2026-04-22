@@ -17,6 +17,7 @@ from .imap_logic import (
     get_graph_access_token,
     get_oauth_access_token,
     parse_text_to_accounts,
+    probe_account_login,
 )
 from .models import (
     AppSettings,
@@ -971,15 +972,9 @@ class MailManager:
             with self.lock:
                 self.login_busy_email = account.email
                 account.status = "登录中"
-            from .imap_logic import connect_imap
-
-            client, method, err = connect_imap(account)
+            success, method, err = probe_account_login(account)
             with self.lock:
-                if client:
-                    try:
-                        client.logout()
-                    except Exception:
-                        pass
+                if success:
                     account.status = "登录成功"
                     account.auth_method = method or "-"
                     account.last_error = ""

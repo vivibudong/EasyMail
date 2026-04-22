@@ -453,6 +453,33 @@ def connect_imap(account: MailAccount) -> tuple[Optional[imaplib.IMAP4_SSL], Opt
     return None, None, "；".join(errors)
 
 
+def probe_account_login(account: MailAccount) -> tuple[bool, str, str]:
+    graph_errors: list[str] = []
+    if _is_outlook_graph_candidate(account):
+        access_token, message = get_graph_access_token(account)
+        if access_token:
+            payload, error = _graph_request_json("/me/messages?$top=1&$select=id", access_token)
+            if payload is not None and isinstance(payload.get("value", []), list):
+                account.auth_method = "Graph API"
+                return True, "Graph API", ""
+            graph_errors.append(f"Graph API: {error}")
+        else:
+            graph_errors.append(message)
+
+    client, method, err = connect_imap(account)
+    if client:
+        try:
+            client.logout()
+        except Exception:
+            pass
+        account.auth_method = method or "-"
+        return True, method or "-", ""
+
+    if graph_errors:
+        return False, "", "；".join([*graph_errors, err])
+    return False, "", err
+
+
 def fetch_mails_once(
     account: MailAccount,
     local_read_keys: Optional[set[str]],
