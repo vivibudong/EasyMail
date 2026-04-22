@@ -396,6 +396,7 @@
         v-if="contextMenu.visible"
         class="dropdown fixed z-[70] w-56 p-0"
         :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+        @click.stop
       >
         <template v-if="contextMenu.kind === 'account'">
           <div class="px-3 py-2 text-xs font-semibold text-gray-500 dark:text-dark-400">账号操作</div>
@@ -414,8 +415,13 @@
             </button>
             <div
               v-if="contextSubmenuOpen"
-              class="dropdown absolute top-0 z-[80] w-80 p-3"
-              :class="contextMenu.submenu_side === 'left' ? 'right-full mr-1' : 'left-full ml-1'"
+              class="dropdown absolute top-0 z-[80] w-80 p-3 before:absolute before:top-0 before:bottom-0 before:w-4 before:bg-transparent"
+              :class="
+                contextMenu.submenu_side === 'left'
+                  ? 'right-full -mr-1 before:-right-4'
+                  : 'left-full -ml-1 before:-left-4'
+              "
+              @click.stop
             >
               <div class="space-y-3">
                 <div>
@@ -825,7 +831,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import {
   assignAccountGroup,
@@ -1013,6 +1019,7 @@ let graphReauthTimer: number | null = null
 let accountResizeObserver: ResizeObserver | null = null
 let mailResizeObserver: ResizeObserver | null = null
 let handleWindowResize: (() => void) | null = null
+let pageSizingFrame: number | null = null
 
 const allAccounts = computed(() => dashboard.value?.accounts || [])
 const allMails = computed(() => dashboard.value?.mails || [])
@@ -1059,13 +1066,22 @@ const groupOptions = computed<GroupOption[]>(() => {
 })
 
 const tagOptions = computed<TagOption[]>(() =>
-  customTags.value.map((tagDef) => ({
-    key: tagDef.name,
-    label: tagDef.name,
-    accountCount: allAccounts.value.filter((account) => account.tags.includes(tagDef.name)).length,
-    color: tagDef.color,
-    priority: tagDef.priority,
-  })),
+  [
+    {
+      key: '__untagged__',
+      label: '无标签',
+      accountCount: allAccounts.value.filter((account) => account.tags.length === 0).length,
+      color: '#CBD5E1',
+      priority: 1000,
+    },
+    ...customTags.value.map((tagDef) => ({
+      key: tagDef.name,
+      label: tagDef.name,
+      accountCount: allAccounts.value.filter((account) => account.tags.includes(tagDef.name)).length,
+      color: tagDef.color,
+      priority: tagDef.priority,
+    })),
+  ],
 )
 
 const selectedGroupLabel = computed(
@@ -1086,7 +1102,10 @@ const visibleAccountsAll = computed(() => {
     )
   }
   if (selectedTagKey.value) {
-    accounts = accounts.filter((account) => account.tags.includes(selectedTagKey.value))
+    accounts =
+      selectedTagKey.value === '__untagged__'
+        ? accounts.filter((account) => account.tags.length === 0)
+        : accounts.filter((account) => account.tags.includes(selectedTagKey.value))
   }
   const query = searchTerm.value.trim().toLowerCase()
   if (query) {
@@ -1308,6 +1327,15 @@ watch(totalMailPages, (value) => {
   }
 })
 
+watch(
+  [paginatedAccounts, visibleAccountsAll],
+  async () => {
+    await nextTick()
+    scheduleAutoPageSizing()
+  },
+  { deep: true },
+)
+
 onMounted(async () => {
   await refreshState()
   refreshTimer = window.setInterval(() => {
@@ -1321,6 +1349,7 @@ onBeforeUnmount(() => {
   if (refreshTimer) window.clearInterval(refreshTimer)
   stopBodyPolling()
   stopGraphReauthPolling()
+  if (pageSizingFrame) window.cancelAnimationFrame(pageSizingFrame)
   document.removeEventListener('click', closeContextMenu)
   accountResizeObserver?.disconnect()
   mailResizeObserver?.disconnect()
@@ -1333,14 +1362,40 @@ function computePageSize(containerHeight: number, rowHeight: number, minimum = 4
   return Math.max(minimum, Math.floor(containerHeight / rowHeight))
 }
 
-function setupAutoPageSizing() {
-  const refreshSizes = () => {
+function computeAccountPageSizeFromRows(container: HTMLElement) {
+  const rows = Array.from(container.querySelectorAll<HTMLElement>('.account-row'))
+  if (!rows.length) {
+    return computePageSize(container.clientHeight - 4, 70, 5)
+  }
+  const availableHeight = container.clientHeight
+  let usedHeight = 0
+  let fitCount = 0
+  for (const row of rows) {
+    usedHeight += row.offsetHeight
+    if (usedHeight > availableHeight) break
+    fitCount += 1
+  }
+  return Math.max(1, fitCount || 1)
+}
+
+function scheduleAutoPageSizing() {
+  if (pageSizingFrame) {
+    window.cancelAnimationFrame(pageSizingFrame)
+  }
+  pageSizingFrame = window.requestAnimationFrame(() => {
+    pageSizingFrame = null
     if (accountListRef.value) {
-      accountPageSize.value = computePageSize(accountListRef.value.clientHeight - 4, 70, 5)
+      accountPageSize.value = computeAccountPageSizeFromRows(accountListRef.value)
     }
     if (mailListRef.value) {
       mailPageSize.value = computePageSize(mailListRef.value.clientHeight - 18, 66, 6)
     }
+  })
+}
+
+function setupAutoPageSizing() {
+  const refreshSizes = () => {
+    scheduleAutoPageSizing()
   }
 
   refreshSizes()
@@ -2076,7 +2131,6 @@ async function toggleTagFromMenu(tagName: string) {
   const tags = account.tags.includes(tagName)
     ? account.tags.filter((item) => item !== tagName)
     : [...account.tags, tagName]
-  closeContextMenu()
   try {
     const response = await setAccountTags(email, tags)
     showSuccess(response.message)
@@ -2113,7 +2167,6 @@ async function runSingleRelogin(email: string) {
 
 async function applyFlag(color: string) {
   const email = contextMenu.value.email
-  closeContextMenu()
   try {
     const response = await updateFlag(email, color)
     showSuccess(response.message)

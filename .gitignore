@@ -12,3 +12,4 @@ backend/app/__pycache__
 *.pyd
 .DS_Store
 .codex
+PRIVATE_CONTEXT.md

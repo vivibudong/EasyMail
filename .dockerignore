@@ -1,5 +1,6 @@
 .env
 .codex
+PRIVATE_CONTEXT.md
 data
 frontend/node_modules
 frontend/dist
