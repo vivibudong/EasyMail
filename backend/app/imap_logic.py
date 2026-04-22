@@ -351,6 +351,7 @@ def fetch_mails_via_graph(
             if item.source == "graph":
                 existing_by_key[item.local_key] = item
     merged_unseen_total = 0
+    successful_folder_requests = 0
     for folder_id, folder_name in _graph_folder_candidates():
         path = (
             f"/me/mailFolders/{quote(folder_id)}/messages"
@@ -361,6 +362,7 @@ def fetch_mails_via_graph(
         payload, error = _graph_request_json(path, access_token)
         if payload is None:
             continue
+        successful_folder_requests += 1
         messages = payload.get("value", [])
         if not isinstance(messages, list):
             continue
@@ -412,11 +414,13 @@ def fetch_mails_via_graph(
                 body_text="",
             )
             existing_by_key[local_key] = new_item
-    if not existing_by_key:
+    if successful_folder_requests == 0:
         return 0, existing_mails or [], "Graph API 未获取到可用邮件，已回退 IMAP"
     merged = list(existing_by_key.values())
     merged.sort(key=lambda item: item.date_value, reverse=True)
     account.auth_method = "Graph API"
+    if not merged:
+        return 0, [], "Graph收信成功（0封邮件）"
     return merged_unseen_total, merged, "Graph收信成功"
 
 

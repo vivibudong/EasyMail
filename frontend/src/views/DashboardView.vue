@@ -1297,13 +1297,14 @@ watch(
   { immediate: true },
 )
 
-watch(
-  [selectedGroupKey, selectedTagKey, selectedAccountEmail],
-  () => {
-    accountPage.value = 1
-    mailPage.value = 1
-  },
-)
+watch([selectedGroupKey, selectedTagKey], () => {
+  accountPage.value = 1
+  mailPage.value = 1
+})
+
+watch(selectedAccountEmail, () => {
+  mailPage.value = 1
+})
 
 watch(
   taskSettings,
