@@ -29,6 +29,7 @@ from .storage import SqliteStorage
 
 GRAPH_REAUTH_SCOPE = "offline_access openid profile https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read"
 MANUAL_OAUTH_SCOPE = GRAPH_REAUTH_SCOPE
+MICROSOFT_CONSUMERS_BASE_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0"
 
 storage = SqliteStorage(config.data_dir)
 manager = MailManager(storage)
@@ -236,7 +237,7 @@ def _build_authorize_url(client_id: str, redirect_uri: str, state: str, code_cha
             "prompt": "login",
         }
     )
-    return f"https://login.microsoftonline.com/common/oauth2/v2.0/authorize?{query}"
+    return f"{MICROSOFT_CONSUMERS_BASE_URL}/authorize?{query}"
 
 
 def _get_graph_profile(access_token: str) -> dict:
@@ -708,17 +709,30 @@ def complete_manual_oauth(
 
     try:
         token_data = _post_form_json(
-            "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+            f"{MICROSOFT_CONSUMERS_BASE_URL}/token",
             {
                 "client_id": session["client_id"],
                 "grant_type": "authorization_code",
                 "code": code,
                 "redirect_uri": session["redirect_uri"],
                 "code_verifier": session["code_verifier"],
-                "scope": MANUAL_OAUTH_SCOPE,
             },
         )
     except ValueError as exc:
+        manager.log_event(
+            "error",
+            "oauth_manual",
+            "token_exchange_failed",
+            str(session["email"]),
+            "手动微软授权 token 交换失败",
+            {
+                "client_id": session["client_id"],
+                "redirect_uri": session["redirect_uri"],
+                "code_length": len(code),
+                "session_age_seconds": round(time.time() - (float(session["expires_at"]) - 900), 2),
+                "error": str(exc),
+            },
+        )
         raise HTTPException(status_code=400, detail=f"token 交换失败: {exc}") from exc
 
     refresh_token = str(token_data.get("refresh_token", "") or "")
