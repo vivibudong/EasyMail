@@ -522,7 +522,17 @@
                 <button class="btn btn-secondary btn-sm px-2 py-1" @click="handleRunBackup">
                   立即备份账号
                 </button>
+                <button class="btn btn-secondary btn-sm px-2 py-1" @click="restoreBackupInput?.click()">
+                  恢复备份
+                </button>
                 <button class="btn btn-secondary btn-sm px-2 py-1" @click="taskCenterOpen = false">关闭</button>
+                <input
+                  ref="restoreBackupInput"
+                  class="hidden"
+                  type="file"
+                  accept=".zip,application/zip"
+                  @change="handleRestoreBackupFile"
+                />
               </div>
             </div>
             <div class="modal-body grid gap-6 lg:grid-cols-2">
@@ -570,6 +580,10 @@
                   <span class="text-xs text-gray-500 dark:text-dark-400">备份目录</span>
                   <input v-model="taskSettings.backup_directory" class="input" type="text" />
                 </label>
+                <div class="mt-3 space-y-2 text-xs leading-6 text-gray-500 dark:text-dark-400">
+                  <p>自动备份会生成 ZIP 压缩包，包含账号明文备份、结构化账号备份和系统设置备份。</p>
+                  <p>恢复备份时不会恢复邮件缓存与已读状态，只恢复账号、分组、标签、偏好与系统设置，并自动重新登录账号。</p>
+                </div>
               </section>
 
               <section class="card p-4">
@@ -927,6 +941,7 @@ import {
   openMail,
   receiveAccounts,
   reloginAccounts,
+  restoreAccountBackup,
   runAccountBackup,
   runTokenRefresh,
   saveSettings,
@@ -978,6 +993,7 @@ const selectedMailDetail = ref<MailItem | null>(null)
 const selectedBodyTask = ref<BodyTask | null>(null)
 const checkedAccounts = ref<string[]>([])
 const fileInput = ref<HTMLInputElement | null>(null)
+const restoreBackupInput = ref<HTMLInputElement | null>(null)
 const toastStore = useToastStore()
 const detailDialog = ref<{ title: string; body: string } | null>(null)
 const groupSectionOpen = ref(true)
@@ -1756,6 +1772,22 @@ async function handleRunBackup() {
     showSuccess(`${response.message}：${response.data.path}`)
   } catch (error: any) {
     showError(error?.response?.data?.detail || '账号备份失败')
+  }
+}
+
+async function handleRestoreBackupFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  try {
+    const response = await restoreAccountBackup(file)
+    showSuccess(
+      `${response.message}：恢复 ${response.data.accounts} 个账号，${response.data.custom_groups} 个分组，${response.data.custom_tags} 个标签`,
+    )
+    await refreshState(true)
+  } catch (error: any) {
+    showError(error?.response?.data?.detail || '恢复备份失败')
   }
 }
 

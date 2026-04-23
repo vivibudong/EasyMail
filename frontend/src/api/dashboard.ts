@@ -306,6 +306,19 @@ export async function runAccountBackup() {
   return data
 }
 
+export async function restoreAccountBackup(file: File) {
+  const form = new FormData()
+  form.append('file', file)
+  const { data } = await apiClient.post<
+    ApiResponse<{
+      accounts: number
+      custom_groups: number
+      custom_tags: number
+    }>
+  >('/backup/restore', form)
+  return data
+}
+
 export async function getLogs(options?: {
   category?: string
   level?: string

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import io
 import json
 from pathlib import Path
 import queue
 import re
 import threading
 import time
+import zipfile
 from dataclasses import asdict
 from typing import Optional
 
@@ -27,8 +29,10 @@ from .models import (
     MailAccount,
     MailItem,
     TagDefinition,
+    account_from_dict,
     account_to_dict,
     normalize_import_delimiters,
+    settings_from_dict,
     settings_to_dict,
 )
 from .storage import SqliteStorage
@@ -263,6 +267,14 @@ class MailManager:
         self.receive_total = 0
         self.receive_done = 0
         self.receive_busy_email = ""
+
+    def _clear_runtime_queues(self) -> None:
+        for current_queue in (self.login_q, self.receive_q, self.body_q):
+            while True:
+                try:
+                    current_queue.get_nowait()
+                except queue.Empty:
+                    break
 
     def enqueue_login(self, account: MailAccount) -> None:
         if account.email in self.queued_login:
@@ -917,7 +929,8 @@ class MailManager:
             if self.backup_running:
                 raise ValueError("备份任务正在执行")
             self.backup_running = True
-            payload = [account_to_dict(account) for account in self.accounts]
+            accounts_payload = [account_to_dict(account) for account in self.accounts]
+            settings_payload = settings_to_dict(self.settings)
             directory_setting = self.settings.backup_directory.strip() or "backups"
             keep_count = max(1, self.settings.backup_keep_count)
         try:
@@ -925,14 +938,57 @@ class MailManager:
             if not backup_dir.is_absolute():
                 backup_dir = self.storage.base_dir / backup_dir
             backup_dir.mkdir(parents=True, exist_ok=True)
-            file_path = backup_dir / f"accounts-backup-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
-            file_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            backup_files = sorted(backup_dir.glob("accounts-backup-*.json"), reverse=True)
+            timestamp = dt.datetime.now().strftime('%Y%m%d-%H%M%S')
+            file_path = backup_dir / f"easymail-backup-{timestamp}.zip"
+            account_lines = [
+                f"{account.email}---{account.password}---{account.auth_code_or_client_id}---{account.token}"
+                for account in self.accounts
+            ]
+            manifest = {
+                "app": "EasyMail",
+                "created_at": dt.datetime.utcnow().isoformat(),
+                "trigger_source": trigger_source,
+                "account_count": len(accounts_payload),
+                "files": [
+                    "accounts-plain.txt",
+                    "accounts.json",
+                    "settings.json",
+                ],
+            }
+            with zipfile.ZipFile(file_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(
+                    "accounts-plain.txt",
+                    "\n".join(account_lines),
+                )
+                archive.writestr(
+                    "accounts.json",
+                    json.dumps(accounts_payload, ensure_ascii=False, indent=2),
+                )
+                archive.writestr(
+                    "settings.json",
+                    json.dumps(settings_payload, ensure_ascii=False, indent=2),
+                )
+                archive.writestr(
+                    "manifest.json",
+                    json.dumps(manifest, ensure_ascii=False, indent=2),
+                )
+            backup_files = sorted(backup_dir.glob("easymail-backup-*.zip"), reverse=True)
             for old_file in backup_files[keep_count:]:
                 old_file.unlink(missing_ok=True)
             self.last_backup_run_at = time.time()
             self._persist_scheduler_state()
-            self.log_event("info", "backup", "complete", trigger_source, "账号备份完成", {"path": str(file_path), "retained": min(len(backup_files), keep_count)})
+            self.log_event(
+                "info",
+                "backup",
+                "complete",
+                trigger_source,
+                "完整备份完成",
+                {
+                    "path": str(file_path),
+                    "retained": min(len(backup_files), keep_count),
+                    "accounts": len(accounts_payload),
+                },
+            )
             return {
                 "path": str(file_path),
                 "retained": min(len(backup_files), keep_count),
@@ -941,6 +997,101 @@ class MailManager:
         finally:
             with self.lock:
                 self.backup_running = False
+
+    def restore_backup(self, backup_bytes: bytes) -> dict:
+        if not backup_bytes:
+            raise ValueError("备份文件为空")
+        with self.lock:
+            if self.backup_running or self.token_refresh_running:
+                raise ValueError("当前存在运行中的备份或 Token 任务，请稍后再试")
+            if self.login_busy_email or self.receive_busy_email or self.queued_login or self.queued_receive or self.queued_body:
+                raise ValueError("当前队列不为空，请等待登录/收件任务完成后再恢复")
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(backup_bytes))
+        except zipfile.BadZipFile as exc:
+            raise ValueError("备份文件不是有效的 ZIP 压缩包") from exc
+
+        with archive:
+            names = set(archive.namelist())
+            if "accounts.json" not in names or "settings.json" not in names:
+                raise ValueError("备份包缺少必要文件 accounts.json 或 settings.json")
+            try:
+                accounts_payload = json.loads(archive.read("accounts.json").decode("utf-8"))
+                settings_payload = json.loads(archive.read("settings.json").decode("utf-8"))
+            except Exception as exc:
+                raise ValueError("备份包内容解析失败") from exc
+
+        if not isinstance(accounts_payload, list) or not isinstance(settings_payload, dict):
+            raise ValueError("备份包格式无效")
+
+        restored_accounts: list[MailAccount] = []
+        seen_emails: set[str] = set()
+        for item in accounts_payload:
+            if not isinstance(item, dict):
+                continue
+            account = account_from_dict(item)
+            if not account:
+                continue
+            key = account.email.lower()
+            if key in seen_emails:
+                continue
+            seen_emails.add(key)
+            restored_accounts.append(account)
+
+        restored_settings = settings_from_dict(settings_payload)
+
+        with self.lock:
+            self.accounts = restored_accounts
+            self.settings = restored_settings
+            self.settings.custom_groups = self._sort_groups(self.settings.custom_groups)
+            self.settings.custom_tags = self._sort_tags(self.settings.custom_tags)
+            self.settings.import_delimiters = normalize_import_delimiters(self.settings.import_delimiters)
+            self.local_read_keys = set()
+            self.all_mails.clear()
+            self.mail_items.clear()
+            self.body_tasks.clear()
+            self.queued_login.clear()
+            self.queued_receive.clear()
+            self.queued_body.clear()
+            self._clear_runtime_queues()
+            self.reset_login_progress()
+            self.reset_receive_progress()
+            self.storage.clear_mail_cache()
+            self.storage.clear_read_state()
+            self.storage.save_settings(self.settings)
+            self._save_accounts_state()
+            self.rebuild_mail_pool()
+            self.last_auto_receive_run_at = 0.0
+            self.last_token_refresh_run_at = 0.0
+            self.last_backup_run_at = time.time()
+            self._persist_scheduler_state()
+            for account in self.accounts:
+                account.status = "待登录"
+                account.last_error = ""
+                account.cached_access_token = ""
+                account.cached_access_expire_at = 0.0
+                account.cached_graph_access_token = ""
+                account.cached_graph_access_expire_at = 0.0
+                self.enqueue_login(account)
+            self.log_event(
+                "warn",
+                "backup",
+                "restore",
+                "backup",
+                "恢复完整备份",
+                {
+                    "accounts": len(self.accounts),
+                    "custom_groups": len(self.settings.custom_groups),
+                    "custom_tags": len(self.settings.custom_tags),
+                },
+            )
+            self._save_accounts_state()
+
+        return {
+            "accounts": len(restored_accounts),
+            "custom_groups": len(restored_settings.custom_groups),
+            "custom_tags": len(restored_settings.custom_tags),
+        }
 
     def scheduler_worker(self) -> None:
         while not self.scheduler_stop.is_set():

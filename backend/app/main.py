@@ -864,6 +864,19 @@ def run_backup(current_user: dict = Depends(get_current_user)) -> dict:
     return ok("账号备份已完成", result)
 
 
+@app.post("/api/backup/restore")
+async def restore_backup(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    file_bytes = await file.read()
+    try:
+        result = manager.restore_backup(file_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok("备份已恢复，账号正在重新登录", result)
+
+
 @app.get("/api/logs")
 def list_logs(
     category: str = Query(default=""),

@@ -234,6 +234,14 @@ class SqliteStorage:
                 (email_addr,),
             )
 
+    def clear_mail_cache(self) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM mail_cache")
+
+    def clear_read_state(self) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM read_state")
+
     def append_refresh_history(self, trigger_source: str, payload: dict[str, Any]) -> None:
         with self._connect() as connection:
             connection.execute(
