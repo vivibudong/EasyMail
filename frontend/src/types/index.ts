@@ -45,6 +45,7 @@ export interface MailAccountSummary {
   email: string
   group_name: string
   tags: string[]
+  note: string
   status: string
   last_check: string
   unseen_count: number

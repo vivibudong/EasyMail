@@ -119,6 +119,7 @@ export async function getAccountDetail(email: string) {
         group_name: string
         flag_color: string
         tags: string[]
+        note: string
       }
     }>
   >('/accounts/detail', {
@@ -138,6 +139,7 @@ export async function updateAccount(payload: {
   group_name: string
   flag_color: string
   tags: string[]
+  note: string
 }) {
   const { data } = await apiClient.put<ApiResponse<{ account: unknown }>>('/accounts', payload)
   return data

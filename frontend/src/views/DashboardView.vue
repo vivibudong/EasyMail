@@ -207,11 +207,21 @@
                         </span>
                         <span
                           v-if="account.tags.length > visibleAccountTags(account).length"
-                          class="flex-shrink-0 text-[10px] text-gray-400 dark:text-dark-500"
+                          class="flex-shrink-0 cursor-pointer rounded-md px-1 text-[10px] text-gray-400 hover:bg-gray-100 dark:text-dark-500 dark:hover:bg-dark-700"
+                          @mouseenter.stop="openAccountMetaPopover($event, account)"
+                          @mouseleave="scheduleCloseAccountMetaPopover"
                         >
                           +{{ account.tags.length - visibleAccountTags(account).length }}
                         </span>
                       </template>
+                      <span
+                        v-if="account.note"
+                        class="flex-shrink-0 cursor-pointer rounded-md px-1 text-[10px] font-semibold text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-900/10"
+                        @mouseenter.stop="openAccountMetaPopover($event, account)"
+                        @mouseleave="scheduleCloseAccountMetaPopover"
+                      >
+                        备
+                      </span>
                     </div>
                   </div>
                   <button
@@ -497,6 +507,45 @@
         </template>
       </div>
 
+      <div
+        v-if="accountMetaPopover.visible"
+        class="dropdown fixed z-[75] w-80 p-3"
+        :style="{ left: `${accountMetaPopover.x}px`, top: `${accountMetaPopover.y}px` }"
+        @mouseenter="cancelCloseAccountMetaPopover"
+        @mouseleave="closeAccountMetaPopover"
+      >
+        <div class="space-y-3 text-xs">
+          <div>
+            <div class="mb-1 font-semibold text-gray-900 dark:text-white">{{ accountMetaPopover.account?.email }}</div>
+            <div class="text-gray-500 dark:text-dark-400">分组：{{ accountMetaPopover.account?.group_name || '未分组' }}</div>
+          </div>
+          <div>
+            <div class="mb-1 text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-dark-400">全部标签</div>
+            <div class="flex flex-wrap gap-1.5">
+              <span
+                v-for="tagName in accountMetaPopover.account?.tags || []"
+                :key="tagName"
+                class="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px]"
+                :style="tagPillStyle(tagName)"
+              >
+                <span class="inline-block h-1.5 w-1.5 rounded-full" :style="{ backgroundColor: tagColor(tagName) }"></span>
+                {{ tagName }}
+              </span>
+              <span v-if="!(accountMetaPopover.account?.tags || []).length" class="text-gray-400 dark:text-dark-500">无标签</span>
+            </div>
+          </div>
+          <div v-if="accountMetaPopover.account?.note">
+            <div class="mb-1 flex items-center justify-between gap-2">
+              <span class="text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-dark-400">备注</span>
+              <button class="btn btn-secondary btn-sm px-2 py-1" @click="copyAccountNote(accountMetaPopover.account.note)">复制备注</button>
+            </div>
+            <div class="max-h-40 overflow-y-auto whitespace-pre-wrap rounded-xl border border-gray-100 bg-gray-50/70 px-3 py-2 text-[11px] text-gray-700 dark:border-dark-700 dark:bg-dark-800/60 dark:text-dark-200">
+              {{ accountMetaPopover.account.note }}
+            </div>
+          </div>
+        </div>
+      </div>
+
       <transition name="modal">
         <div v-if="detailDialog" class="modal-overlay" @click.self="detailDialog = null">
           <div class="modal-content max-w-2xl">
@@ -662,7 +711,15 @@
               </label>
               <label class="space-y-2">
                 <span class="text-xs text-gray-500 dark:text-dark-400">旗标色</span>
-                <input v-model="editAccountForm.flag_color" class="input" type="text" />
+                <select v-model="editAccountForm.flag_color" class="input">
+                  <option v-for="flag in flagOptions" :key="flag.label" :value="flag.color">
+                    {{ flag.label }}
+                  </option>
+                </select>
+              </label>
+              <label class="space-y-2 md:col-span-2">
+                <span class="text-xs text-gray-500 dark:text-dark-400">备注</span>
+                <textarea v-model="editAccountForm.note" class="input min-h-24" placeholder="手动记录这个邮箱的备注信息"></textarea>
               </label>
               <div class="space-y-2 md:col-span-2">
                 <span class="text-xs text-gray-500 dark:text-dark-400">标签</span>
@@ -1090,6 +1147,18 @@ const editAccountForm = ref({
   group_name: '未分组',
   flag_color: '',
   tags: [] as string[],
+  note: '',
+})
+const accountMetaPopover = ref<{
+  visible: boolean
+  x: number
+  y: number
+  account: MailAccountSummary | null
+}>({
+  visible: false,
+  x: 0,
+  y: 0,
+  account: null,
 })
 const taxonomyDialog = ref({
   open: false,
@@ -1122,6 +1191,7 @@ const flagOptions = [
 let refreshTimer: number | null = null
 let bodyTimer: number | null = null
 let graphReauthTimer: number | null = null
+let accountMetaPopoverTimer: number | null = null
 let accountResizeObserver: ResizeObserver | null = null
 let mailResizeObserver: ResizeObserver | null = null
 let handleWindowResize: (() => void) | null = null
@@ -1461,6 +1531,7 @@ onBeforeUnmount(() => {
   stopBodyPolling()
   stopGraphReauthPolling()
   if (pageSizingFrame) window.cancelAnimationFrame(pageSizingFrame)
+  cancelCloseAccountMetaPopover()
   document.removeEventListener('click', closeContextMenu)
   accountResizeObserver?.disconnect()
   mailResizeObserver?.disconnect()
@@ -1584,6 +1655,40 @@ function tagPillStyle(tagName: string) {
 
 function visibleAccountTags(account: MailAccountSummary) {
   return account.tags.slice(0, 2)
+}
+
+function openAccountMetaPopover(event: MouseEvent, account: MailAccountSummary) {
+  cancelCloseAccountMetaPopover()
+  const width = 320
+  const height = account.note ? 220 : 150
+  const x = Math.min(window.innerWidth - width - 12, event.clientX + 12)
+  const y = Math.min(window.innerHeight - height - 12, Math.max(12, event.clientY - 16))
+  accountMetaPopover.value = {
+    visible: true,
+    x: Math.max(12, x),
+    y: Math.max(12, y),
+    account,
+  }
+}
+
+function scheduleCloseAccountMetaPopover() {
+  cancelCloseAccountMetaPopover()
+  accountMetaPopoverTimer = window.setTimeout(() => {
+    closeAccountMetaPopover()
+  }, 120)
+}
+
+function cancelCloseAccountMetaPopover() {
+  if (accountMetaPopoverTimer) {
+    window.clearTimeout(accountMetaPopoverTimer)
+    accountMetaPopoverTimer = null
+  }
+}
+
+function closeAccountMetaPopover() {
+  cancelCloseAccountMetaPopover()
+  accountMetaPopover.value.visible = false
+  accountMetaPopover.value.account = null
 }
 
 function accountHasTag(email: string, tagName: string) {
@@ -2301,6 +2406,15 @@ async function copyEmail(email: string) {
       // Ignore and fall through to toast error.
     }
     showError('复制失败')
+  }
+}
+
+async function copyAccountNote(note: string) {
+  try {
+    await navigator.clipboard.writeText(note)
+    showSuccess('备注已复制')
+  } catch {
+    showError('复制备注失败')
   }
 }
 

@@ -125,6 +125,7 @@ class AccountUpdateRequest(BaseModel):
     group_name: str = "未分组"
     flag_color: str = ""
     tags: list[str] = Field(default_factory=list)
+    note: str = ""
 
 
 class GraphReauthStartRequest(BaseModel):

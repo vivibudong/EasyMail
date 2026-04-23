@@ -77,6 +77,9 @@ class MailManager:
         self.last_token_refresh_run_at = float(task_state.get("last_token_refresh_run_at", 0.0) or 0.0)
         self.last_backup_run_at = float(task_state.get("last_backup_run_at", 0.0) or 0.0)
         self.last_mail_summary_sent_at = float(task_state.get("last_mail_summary_sent_at", time.time()) or time.time())
+        self.last_telegram_notification_cutoff_at = float(task_state.get("last_telegram_notification_cutoff_at", time.time()) or time.time())
+        self.pending_mail_batch_started_at = float(task_state.get("pending_mail_batch_started_at", 0.0) or 0.0)
+        self.last_mail_event_at = float(task_state.get("last_mail_event_at", 0.0) or 0.0)
 
         self.settings.custom_groups = self._sort_groups(self.settings.custom_groups)
         self.settings.custom_tags = self._sort_tags(self.settings.custom_tags)
@@ -119,6 +122,9 @@ class MailManager:
                 "last_token_refresh_run_at": self.last_token_refresh_run_at,
                 "last_backup_run_at": self.last_backup_run_at,
                 "last_mail_summary_sent_at": self.last_mail_summary_sent_at,
+                "last_telegram_notification_cutoff_at": self.last_telegram_notification_cutoff_at,
+                "pending_mail_batch_started_at": self.pending_mail_batch_started_at,
+                "last_mail_event_at": self.last_mail_event_at,
             },
         )
 
@@ -152,6 +158,9 @@ class MailManager:
 
     def _now_shanghai(self) -> dt.datetime:
         return dt.datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+
+    def _shanghai_from_timestamp(self, value: float) -> dt.datetime:
+        return dt.datetime.fromtimestamp(value, ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
 
     def _telegram_ready(self) -> bool:
         return (
@@ -212,23 +221,36 @@ class MailManager:
             return
         if self.settings.telegram_mail_mode == "off" or not self._should_notify_account(account):
             return
+        cutoff_dt = self._shanghai_from_timestamp(self.last_telegram_notification_cutoff_at)
+        eligible_items = [item for item in items if item.date_value > cutoff_dt]
+        if not eligible_items:
+            return
         if self.settings.telegram_mail_mode == "instant":
-            for item in items:
+            for item in eligible_items:
                 try:
                     self._notify_new_mail_instant(account, item)
                 except Exception as exc:
                     self.log_event("error", "notification", "telegram_instant_failed", account.email, "新邮件 Telegram 通知失败", {"error": str(exc)})
             return
         now_text = format_shanghai_time(self._now_shanghai())
-        for item in items:
+        now = time.time()
+        if not self.pending_mail_batch_started_at:
+            self.pending_mail_batch_started_at = now
+        self.last_mail_event_at = now
+        existing_keys = {item["local_key"] for item in self.pending_mail_notifications}
+        for item in eligible_items:
+            if item.local_key in existing_keys:
+                continue
             self.pending_mail_notifications.append(
                 {
+                    "local_key": item.local_key,
                     "group_name": account.group_name or "未分组",
                     "email": account.email,
                     "subject": item.subject,
                     "received_at": now_text,
                 }
             )
+        self._persist_scheduler_state()
 
     def flush_mail_summary_notifications(self, force: bool = False) -> None:
         with self.lock:
@@ -236,12 +258,21 @@ class MailManager:
                 return
             if not self.pending_mail_notifications:
                 return
-            interval_minutes = max(5, int(self.settings.telegram_mail_summary_minutes or 60))
             now = time.time()
-            if not force and now - self.last_mail_summary_sent_at < interval_minutes * 60:
-                return
-            items = self.pending_mail_notifications[:]
-            self.pending_mail_notifications.clear()
+            queue_busy = bool(self.receive_busy_email or self.queued_receive)
+            if len(self.pending_mail_notifications) < 10:
+                if queue_busy and not force:
+                    return
+                if not force and self.last_mail_event_at and now - self.last_mail_event_at < 30:
+                    return
+            items = self.pending_mail_notifications[:10]
+            self.pending_mail_notifications = self.pending_mail_notifications[10:]
+            if self.pending_mail_notifications:
+                self.pending_mail_batch_started_at = now
+                self.last_mail_event_at = now
+            else:
+                self.pending_mail_batch_started_at = 0.0
+                self.last_mail_event_at = 0.0
             self.last_mail_summary_sent_at = now
             self._persist_scheduler_state()
         lines = [
@@ -250,15 +281,21 @@ class MailManager:
             f"📬 收到 {len(items)} 封新邮件",
             f"📁 监听分组：{self.settings.telegram_mail_group if self.settings.telegram_mail_group != '__all__' else '全部邮箱'}",
         ]
-        for item in items[:20]:
+        for item in items:
             lines.append(f"• {item['email']} | {item['subject']}")
-        if len(items) > 20:
-            lines.append(f"… 其余 {len(items) - 20} 封未展开")
+        if self.pending_mail_notifications:
+            lines.append(f"… 其余 {len(self.pending_mail_notifications)} 封将继续在下一条通知中发送")
         try:
             self._send_telegram_message("\n".join(lines))
             self.log_event("info", "notification", "telegram_summary", "telegram", "发送 Telegram 邮件汇总通知", {"count": len(items)})
         except Exception as exc:
             self.log_event("error", "notification", "telegram_summary_failed", "telegram", "发送 Telegram 邮件汇总通知失败", {"error": str(exc), "count": len(items)})
+            with self.lock:
+                self.pending_mail_notifications = items + self.pending_mail_notifications
+                self.pending_mail_batch_started_at = self.pending_mail_batch_started_at or now
+                self.last_mail_event_at = now
+                self._persist_scheduler_state()
+            return
 
     def _sort_groups(self, groups: list[GroupDefinition]) -> list[GroupDefinition]:
         return sorted(groups, key=lambda item: (-item.priority, item.name.lower()))
@@ -459,6 +496,7 @@ class MailManager:
             "email": account.email,
             "group_name": account.group_name or "未分组",
             "tags": account.tags,
+            "note": account.note,
             "status": account.status,
             "last_check": account.last_check,
             "unseen_count": account.unseen_count,
@@ -715,6 +753,7 @@ class MailManager:
                 "group_name": account.group_name,
                 "flag_color": account.flag_color,
                 "tags": account.tags,
+                "note": account.note,
             }
 
     def update_account(self, original_email: str, payload: dict) -> dict:
@@ -739,6 +778,7 @@ class MailManager:
                 str(payload.get("group_name", account.group_name))
             )
             account.flag_color = str(payload.get("flag_color", account.flag_color))
+            account.note = str(payload.get("note", account.note) or "").strip()
             valid_names = {item.name for item in self.settings.custom_tags}
             tags_payload = payload.get("tags", account.tags)
             cleaned_tags: list[str] = []
@@ -834,6 +874,13 @@ class MailManager:
 
     def update_settings(self, payload: dict) -> dict:
         with self.lock:
+            old_telegram_signature = (
+                self.settings.telegram_enabled,
+                self.settings.telegram_bot_token,
+                self.settings.telegram_chat_id,
+                self.settings.telegram_mail_mode,
+                self.settings.telegram_mail_group,
+            )
             self.settings.auto_receive_interval = int(
                 payload.get("auto_receive_interval", self.settings.auto_receive_interval) or 120
             )
@@ -918,30 +965,6 @@ class MailManager:
             self.settings.telegram_notify_backup = bool(
                 payload.get("telegram_notify_backup", self.settings.telegram_notify_backup)
             )
-            self.settings.telegram_enabled = bool(
-                payload.get("telegram_enabled", self.settings.telegram_enabled)
-            )
-            self.settings.telegram_bot_token = str(
-                payload.get("telegram_bot_token", self.settings.telegram_bot_token) or ""
-            ).strip()
-            self.settings.telegram_chat_id = str(
-                payload.get("telegram_chat_id", self.settings.telegram_chat_id) or ""
-            ).strip()
-            self.settings.telegram_mail_mode = str(
-                payload.get("telegram_mail_mode", self.settings.telegram_mail_mode) or "hourly"
-            ).strip() or "hourly"
-            if self.settings.telegram_mail_mode not in {"off", "instant", "hourly"}:
-                self.settings.telegram_mail_mode = "hourly"
-            self.settings.telegram_mail_group = str(
-                payload.get("telegram_mail_group", self.settings.telegram_mail_group) or "__all__"
-            ).strip() or "__all__"
-            self.settings.telegram_mail_summary_minutes = max(
-                5,
-                int(payload.get("telegram_mail_summary_minutes", self.settings.telegram_mail_summary_minutes) or 60),
-            )
-            self.settings.telegram_notify_backup = bool(
-                payload.get("telegram_notify_backup", self.settings.telegram_notify_backup)
-            )
 
             groups_raw = payload.get("custom_groups", settings_to_dict(self.settings)["custom_groups"])
             next_groups: list[GroupDefinition] = []
@@ -976,6 +999,19 @@ class MailManager:
                     )
                 )
             self.settings.custom_tags = self._sort_tags(next_tags)
+            new_telegram_signature = (
+                self.settings.telegram_enabled,
+                self.settings.telegram_bot_token,
+                self.settings.telegram_chat_id,
+                self.settings.telegram_mail_mode,
+                self.settings.telegram_mail_group,
+            )
+            if old_telegram_signature != new_telegram_signature and self._telegram_ready():
+                self.last_telegram_notification_cutoff_at = time.time()
+                self.pending_mail_notifications.clear()
+                self.pending_mail_batch_started_at = 0.0
+                self.last_mail_event_at = 0.0
+                self._persist_scheduler_state()
             self.storage.save_settings(self.settings)
             self.log_event("info", "settings", "update", "app_settings", "更新系统设置")
             return settings_to_dict(self.settings)

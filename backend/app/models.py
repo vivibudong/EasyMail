@@ -47,6 +47,7 @@ class MailAccount:
     flag_color: str = ""
     group_name: str = "未分组"
     tags: list[str] = field(default_factory=list)
+    note: str = ""
 
 
 @dataclass
@@ -172,6 +173,7 @@ def account_to_dict(a: MailAccount) -> dict:
         "flag_color": a.flag_color,
         "group_name": a.group_name,
         "tags": a.tags,
+        "note": a.note,
     }
 
 
@@ -198,6 +200,7 @@ def account_from_dict(data: dict) -> Optional[MailAccount]:
         flag_color=str(data.get("flag_color", "")),
         group_name=str(data.get("group_name", "未分组") or "未分组"),
         tags=[str(item) for item in data.get("tags", []) if str(item).strip()],
+        note=str(data.get("note", "") or ""),
     )
 
 
