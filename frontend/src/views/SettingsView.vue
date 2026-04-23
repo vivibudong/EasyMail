@@ -66,6 +66,25 @@
       </section>
 
       <section class="grid gap-6 md:grid-cols-2">
+        <div class="card p-6 md:col-span-2">
+          <h3 class="mb-3 text-base font-semibold text-gray-900 dark:text-white">微软授权配置</h3>
+          <div class="grid gap-4 md:grid-cols-2">
+            <label class="space-y-2">
+              <span class="input-label mb-0">Client ID</span>
+              <input v-model="form.oauth_client_id" class="input" type="text" placeholder="你自己的 Azure 应用 Client ID" />
+            </label>
+            <label class="space-y-2">
+              <span class="input-label mb-0">Redirect URI</span>
+              <input v-model="form.oauth_redirect_uri" class="input" type="text" placeholder="例如：http://localhost:8765/callback" />
+            </label>
+          </div>
+          <div class="mt-3 space-y-2 text-xs leading-6 text-gray-500 dark:text-dark-400">
+            <p>这里填写的 Client ID 与 Redirect URI 必须和你在 Azure 应用注册中的配置完全一致。</p>
+            <p>建议保留 `http://localhost:8765/callback` 这类本机回调地址；授权完成后页面打不开是正常现象，只需要复制浏览器地址栏完整回调地址。</p>
+            <p>系统会固定请求 `offline_access openid profile User.Read Mail.Read`，用于获取并验证可用于收件的 refresh token。</p>
+          </div>
+        </div>
+
         <div class="card p-6">
           <h3 class="mb-3 text-base font-semibold text-gray-900 dark:text-white">账号导入格式</h3>
           <div class="space-y-2 text-sm leading-7 text-gray-600 dark:text-dark-300">
@@ -113,6 +132,8 @@ const form = reactive<AppSettings>({
   backup_interval_minutes: 1440,
   backup_directory: 'backups',
   backup_keep_count: 10,
+  oauth_client_id: '',
+  oauth_redirect_uri: 'http://localhost:8765/callback',
 })
 
 const saving = ref(false)

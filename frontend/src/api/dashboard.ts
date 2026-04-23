@@ -161,6 +161,37 @@ export async function startGraphReauth(email: string) {
   return data
 }
 
+export async function startManualOauth(email: string, password: string) {
+  const { data } = await apiClient.post<
+    ApiResponse<{
+      session_id: string
+      authorize_url: string
+      client_id: string
+      redirect_uri: string
+      expires_in: number
+      scope: string
+    }>
+  >('/oauth/manual/start', {
+    email,
+    password,
+  })
+  return data
+}
+
+export async function completeManualOauth(sessionId: string, callbackUrl: string) {
+  const { data } = await apiClient.post<
+    ApiResponse<{
+      email: string
+      client_id: string
+      has_password: boolean
+    }>
+  >('/oauth/manual/complete', {
+    session_id: sessionId,
+    callback_url: callbackUrl,
+  })
+  return data
+}
+
 export async function getGraphReauthStatus(sessionId: string) {
   const { data } = await apiClient.get<
     ApiResponse<{

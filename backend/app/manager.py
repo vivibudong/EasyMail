@@ -759,6 +759,13 @@ class MailManager:
             self.settings.backup_keep_count = int(
                 payload.get("backup_keep_count", self.settings.backup_keep_count) or 10
             )
+            self.settings.oauth_client_id = str(
+                payload.get("oauth_client_id", self.settings.oauth_client_id) or ""
+            ).strip()
+            self.settings.oauth_redirect_uri = str(
+                payload.get("oauth_redirect_uri", self.settings.oauth_redirect_uri)
+                or "http://localhost:8765/callback"
+            ).strip()
 
             groups_raw = payload.get("custom_groups", settings_to_dict(self.settings)["custom_groups"])
             next_groups: list[GroupDefinition] = []

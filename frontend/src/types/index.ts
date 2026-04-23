@@ -105,6 +105,8 @@ export interface AppSettings {
   backup_interval_minutes: number
   backup_directory: string
   backup_keep_count: number
+  oauth_client_id: string
+  oauth_redirect_uri: string
 }
 
 export interface AuthUser {

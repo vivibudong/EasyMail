@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import base64
+import hashlib
 import re
+import secrets
+import string
 import time
 import urllib.error
 import urllib.parse
@@ -20,10 +24,11 @@ from pydantic import BaseModel, Field
 from .auth import create_access_token, get_current_user
 from .config import config
 from .manager import MailManager
-from .models import DEFAULT_IMPORT_DELIMITERS
+from .models import DEFAULT_IMPORT_DELIMITERS, MailAccount
 from .storage import SqliteStorage
 
 GRAPH_REAUTH_SCOPE = "offline_access openid profile https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read"
+MANUAL_OAUTH_SCOPE = GRAPH_REAUTH_SCOPE
 
 storage = SqliteStorage(config.data_dir)
 manager = MailManager(storage)
@@ -54,6 +59,7 @@ class GraphReauthSession:
 
 
 graph_reauth_sessions: dict[str, GraphReauthSession] = {}
+manual_oauth_sessions: dict[str, dict] = {}
 
 
 class LoginRequest(BaseModel):
@@ -124,6 +130,16 @@ class GraphReauthStartRequest(BaseModel):
     email: str
 
 
+class ManualOauthStartRequest(BaseModel):
+    email: str
+    password: str = ""
+
+
+class ManualOauthCompleteRequest(BaseModel):
+    session_id: str
+    callback_url: str
+
+
 class MailOpenRequest(BaseModel):
     local_key: str
 
@@ -151,6 +167,8 @@ class SettingsRequest(BaseModel):
     backup_interval_minutes: int = 1440
     backup_directory: str = "backups"
     backup_keep_count: int = 10
+    oauth_client_id: str = ""
+    oauth_redirect_uri: str = "http://localhost:8765/callback"
 
 
 def ok(message: str, data: Optional[dict] = None) -> dict:
@@ -192,6 +210,57 @@ def _serialize_graph_reauth_session(session: GraphReauthSession) -> dict:
         "status": session.status,
         "message": session.message,
     }
+
+
+def _generate_code_verifier(length: int = 96) -> str:
+    alphabet = string.ascii_letters + string.digits + "-._~"
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _generate_code_challenge(code_verifier: str) -> str:
+    digest = hashlib.sha256(code_verifier.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
+
+
+def _build_authorize_url(client_id: str, redirect_uri: str, state: str, code_challenge: str) -> str:
+    query = urllib.parse.urlencode(
+        {
+            "client_id": client_id,
+            "response_type": "code",
+            "redirect_uri": redirect_uri,
+            "response_mode": "query",
+            "scope": MANUAL_OAUTH_SCOPE,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "state": state,
+            "prompt": "login",
+        }
+    )
+    return f"https://login.microsoftonline.com/common/oauth2/v2.0/authorize?{query}"
+
+
+def _get_graph_profile(access_token: str) -> dict:
+    request = urllib.request.Request(
+        "https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName,displayName",
+        method="GET",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        raise ValueError(raw) from exc
+    try:
+        payload = json.loads(raw)
+    except Exception as exc:
+        raise ValueError(raw) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(raw)
+    return payload
 
 
 def _apply_graph_reauth_success(session: GraphReauthSession, token_payload: dict) -> None:
@@ -559,6 +628,164 @@ def graph_reauth_status(
     if session.status in {"completed", "failed", "expired"}:
         graph_reauth_sessions.pop(session.session_id, None)
     return ok("ok", _serialize_graph_reauth_session(session))
+
+
+@app.post("/api/oauth/manual/start")
+def start_manual_oauth(
+    payload: ManualOauthStartRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    settings = manager.settings
+    client_id = settings.oauth_client_id.strip()
+    redirect_uri = settings.oauth_redirect_uri.strip()
+    if not client_id:
+        raise HTTPException(status_code=400, detail="请先在系统设置中填写 Client ID")
+    if not redirect_uri:
+        raise HTTPException(status_code=400, detail="请先在系统设置中填写 Redirect URI")
+    email_addr = payload.email.strip().lower()
+    if "@" not in email_addr:
+        raise HTTPException(status_code=400, detail="邮箱格式无效")
+    state = secrets.token_urlsafe(24)
+    code_verifier = _generate_code_verifier()
+    code_challenge = _generate_code_challenge(code_verifier)
+    session_id = uuid4().hex
+    authorize_url = _build_authorize_url(client_id, redirect_uri, state, code_challenge)
+    manual_oauth_sessions[session_id] = {
+        "session_id": session_id,
+        "email": email_addr,
+        "password": payload.password,
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "state": state,
+        "code_verifier": code_verifier,
+        "expires_at": time.time() + 900,
+    }
+    manager.log_event(
+        "info",
+        "oauth_manual",
+        "start",
+        email_addr,
+        "发起手动微软授权",
+        {"client_id": client_id, "redirect_uri": redirect_uri},
+    )
+    return ok(
+        "授权链接已生成",
+        {
+            "session_id": session_id,
+            "authorize_url": authorize_url,
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "expires_in": 900,
+            "scope": MANUAL_OAUTH_SCOPE,
+        },
+    )
+
+
+@app.post("/api/oauth/manual/complete")
+def complete_manual_oauth(
+    payload: ManualOauthCompleteRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    session = manual_oauth_sessions.get(payload.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="授权会话不存在或已过期")
+    if time.time() >= float(session["expires_at"]):
+        manual_oauth_sessions.pop(payload.session_id, None)
+        raise HTTPException(status_code=400, detail="授权会话已过期，请重新生成授权链接")
+
+    callback_url = payload.callback_url.strip()
+    parsed = urllib.parse.urlparse(callback_url)
+    query = urllib.parse.parse_qs(parsed.query)
+    if "error" in query:
+        detail = query.get("error_description", query.get("error", ["授权失败"]))[0]
+        raise HTTPException(status_code=400, detail=f"微软授权失败: {detail}")
+    code = query.get("code", [""])[0].strip()
+    state = query.get("state", [""])[0].strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="回调地址中缺少 code 参数")
+    if state != session["state"]:
+        raise HTTPException(status_code=400, detail="state 校验失败，请重新生成授权链接")
+
+    try:
+        token_data = _post_form_json(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+            {
+                "client_id": session["client_id"],
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": session["redirect_uri"],
+                "code_verifier": session["code_verifier"],
+                "scope": MANUAL_OAUTH_SCOPE,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"token 交换失败: {exc}") from exc
+
+    refresh_token = str(token_data.get("refresh_token", "") or "")
+    access_token = str(token_data.get("access_token", "") or "")
+    if not refresh_token:
+        raise HTTPException(status_code=400, detail="微软返回中缺少 refresh_token，请确认应用权限包含 offline_access")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="微软返回中缺少 access_token")
+
+    try:
+        profile = _get_graph_profile(access_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"获取微软账号信息失败: {exc}") from exc
+
+    actual_email = str(profile.get("mail") or profile.get("userPrincipalName") or "").strip().lower()
+    expected_email = str(session["email"]).strip().lower()
+    if not actual_email or "@" not in actual_email:
+        raise HTTPException(status_code=400, detail="微软未返回可识别的邮箱地址，请重试")
+    if actual_email != expected_email:
+        raise HTTPException(
+            status_code=400,
+            detail=f"授权账号与预填邮箱不一致：当前授权为 {actual_email}，预填为 {expected_email}",
+        )
+
+    with manager.lock:
+        existing = manager.find_account(actual_email)
+        if existing:
+            existing.password = str(session["password"] or existing.password)
+            existing.auth_code_or_client_id = str(session["client_id"])
+            existing.token = refresh_token
+            existing.status = "待登录"
+            existing.last_error = ""
+            existing.cached_access_token = ""
+            existing.cached_access_expire_at = 0.0
+            existing.cached_graph_access_token = ""
+            existing.cached_graph_access_expire_at = 0.0
+            target = existing
+        else:
+            target = MailAccount(
+                email=actual_email,
+                password=str(session["password"] or ""),
+                auth_code_or_client_id=str(session["client_id"]),
+                token=refresh_token,
+                status="待登录",
+            )
+            manager.accounts.append(target)
+        manager._save_accounts_state()
+        manager.rebuild_mail_pool()
+        manager.enqueue_login(target)
+        manager.log_event(
+            "info",
+            "oauth_manual",
+            "complete",
+            actual_email,
+            "手动微软授权成功",
+            {"client_id": session["client_id"], "redirect_uri": session["redirect_uri"]},
+        )
+
+    manual_oauth_sessions.pop(payload.session_id, None)
+    return ok(
+        "微软授权成功，账号已加入列表并开始登录",
+        {
+            "email": actual_email,
+            "client_id": session["client_id"],
+            "has_password": bool(session["password"]),
+        },
+    )
 
 
 @app.get("/api/settings")

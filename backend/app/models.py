@@ -84,6 +84,8 @@ class AppSettings:
     backup_interval_minutes: int = 1440
     backup_directory: str = "backups"
     backup_keep_count: int = 10
+    oauth_client_id: str = ""
+    oauth_redirect_uri: str = "http://localhost:8765/callback"
 
 
 @dataclass
@@ -217,6 +219,8 @@ def settings_to_dict(settings: AppSettings) -> dict:
         "backup_interval_minutes": settings.backup_interval_minutes,
         "backup_directory": settings.backup_directory,
         "backup_keep_count": settings.backup_keep_count,
+        "oauth_client_id": settings.oauth_client_id,
+        "oauth_redirect_uri": settings.oauth_redirect_uri,
     }
 
 
@@ -297,4 +301,9 @@ def settings_from_dict(data: dict) -> AppSettings:
         backup_interval_minutes=int(data.get("backup_interval_minutes", 1440) or 1440),
         backup_directory=str(data.get("backup_directory", "backups") or "backups"),
         backup_keep_count=int(data.get("backup_keep_count", 10) or 10),
+        oauth_client_id=str(data.get("oauth_client_id", "") or ""),
+        oauth_redirect_uri=str(
+            data.get("oauth_redirect_uri", "http://localhost:8765/callback")
+            or "http://localhost:8765/callback"
+        ),
     )

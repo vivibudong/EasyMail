@@ -740,6 +740,7 @@
               <div class="tabs">
                 <button class="tab" :class="{ 'tab-active': importMode === 'text' }" @click="importMode = 'text'">粘贴文本</button>
                 <button class="tab" :class="{ 'tab-active': importMode === 'file' }" @click="importMode = 'file'">选择文件</button>
+                <button class="tab" :class="{ 'tab-active': importMode === 'manual' }" @click="importMode = 'manual'">微软授权添加</button>
               </div>
 
               <div v-if="importMode === 'text'" class="space-y-2">
@@ -750,15 +751,90 @@
                 ></textarea>
               </div>
 
-              <div v-else class="space-y-3">
+              <div v-else-if="importMode === 'file'" class="space-y-3">
                 <button class="btn btn-secondary" @click="fileInput?.click()">选择 TXT 文件</button>
                 <div class="text-sm text-gray-500 dark:text-dark-400">
                   {{ selectedImportFileName || '尚未选择文件' }}
                 </div>
               </div>
+
+              <div v-else class="space-y-4">
+                <div
+                  class="rounded-2xl border px-4 py-3 text-sm"
+                  :class="
+                    oauthSettingsReady
+                      ? 'border-sky-200 bg-sky-50/80 text-sky-700 dark:border-sky-800/50 dark:bg-sky-900/10 dark:text-sky-300'
+                      : 'border-amber-200 bg-amber-50/80 text-amber-700 dark:border-amber-800/50 dark:bg-amber-900/10 dark:text-amber-300'
+                  "
+                >
+                  <div v-if="oauthSettingsReady">
+                    已读取系统设置中的 Client ID 与 Redirect URI。请先填写邮箱，建议填写密码以保持账号数据完整。
+                  </div>
+                  <div v-else>
+                    请先到系统设置中填写 Client ID 与 Redirect URI，保存后才能使用微软授权添加。
+                  </div>
+                </div>
+
+                <div class="grid gap-4 md:grid-cols-2">
+                  <label class="space-y-2">
+                    <span class="text-xs text-gray-500 dark:text-dark-400">邮箱</span>
+                    <input v-model="manualOauthForm.email" class="input" type="email" placeholder="输入待绑定的微软邮箱" />
+                  </label>
+                  <label class="space-y-2">
+                    <span class="text-xs text-gray-500 dark:text-dark-400">密码</span>
+                    <input v-model="manualOauthForm.password" class="input" type="text" placeholder="仅保存，不参与本次 OAuth 授权" />
+                  </label>
+                </div>
+
+                <div class="grid gap-4 md:grid-cols-2">
+                  <div class="rounded-xl border border-gray-200 bg-gray-50/70 px-3 py-3 text-xs text-gray-600 dark:border-dark-700 dark:bg-dark-800/60 dark:text-dark-300">
+                    <div class="font-medium text-gray-900 dark:text-white">当前 Client ID</div>
+                    <div class="mt-1 break-all">{{ dashboard?.settings.oauth_client_id || '-' }}</div>
+                  </div>
+                  <div class="rounded-xl border border-gray-200 bg-gray-50/70 px-3 py-3 text-xs text-gray-600 dark:border-dark-700 dark:bg-dark-800/60 dark:text-dark-300">
+                    <div class="font-medium text-gray-900 dark:text-white">当前 Redirect URI</div>
+                    <div class="mt-1 break-all">{{ dashboard?.settings.oauth_redirect_uri || '-' }}</div>
+                  </div>
+                </div>
+
+                <div class="rounded-2xl border border-gray-200 p-4 dark:border-dark-700">
+                  <div class="mb-3 flex flex-wrap items-center gap-2">
+                    <button class="btn btn-primary" :disabled="manualOauthForm.running || !oauthSettingsReady" @click="startManualOauthFlow">
+                      生成授权链接
+                    </button>
+                    <button
+                      v-if="manualOauthForm.authorizeUrl"
+                      class="btn btn-secondary"
+                      @click="copyManualAuthorizeUrl"
+                    >
+                      复制授权链接
+                    </button>
+                  </div>
+                  <div class="space-y-2 text-xs leading-6 text-gray-500 dark:text-dark-400">
+                    <p>建议使用无痕窗口打开授权链接，避免微软账号 Cookie 复用导致绑定到错误邮箱。</p>
+                    <p>授权后如果页面打不开是正常现象，请直接复制浏览器地址栏中的完整回调地址，粘贴到下方文本框。</p>
+                    <p>系统会自动校验实际授权邮箱是否与预填邮箱一致，不一致则拒绝保存。</p>
+                  </div>
+                  <div v-if="manualOauthForm.authorizeUrl" class="mt-3 rounded-xl border border-sky-200 bg-sky-50/80 p-3 text-xs text-sky-700 dark:border-sky-800/50 dark:bg-sky-900/10 dark:text-sky-300">
+                    <div class="font-medium">授权链接</div>
+                    <div class="mt-1 break-all">{{ manualOauthForm.authorizeUrl }}</div>
+                  </div>
+                </div>
+
+                <label class="space-y-2">
+                  <span class="text-xs text-gray-500 dark:text-dark-400">粘贴完整回调地址</span>
+                  <textarea
+                    v-model="manualOauthForm.callbackUrl"
+                    class="input min-h-40 font-mono text-xs"
+                    placeholder="例如：http://localhost:8765/callback?code=...&state=..."
+                  ></textarea>
+                </label>
+              </div>
             </div>
             <div class="modal-footer">
-              <button class="btn btn-primary" @click="submitImport">开始导入</button>
+              <button class="btn btn-primary" :disabled="manualOauthForm.running" @click="submitImport">
+                {{ importMode === 'manual' ? '完成添加' : '开始导入' }}
+              </button>
             </div>
           </div>
         </div>
@@ -835,6 +911,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import {
   assignAccountGroup,
+  completeManualOauth,
   createGroupDetailed,
   createTag,
   deleteAccounts,
@@ -854,6 +931,7 @@ import {
   runTokenRefresh,
   saveSettings,
   setAccountTags,
+  startManualOauth,
   startGraphReauth,
   toggleMailStar,
   updateAccount,
@@ -908,10 +986,21 @@ const taskCenterOpen = ref(false)
 const taskSettingsDirty = ref(false)
 const editAccountOpen = ref(false)
 const importDialogOpen = ref(false)
-const importMode = ref<'text' | 'file'>('text')
+const importMode = ref<'text' | 'file' | 'manual'>('text')
 const importText = ref('')
 const selectedImportFile = ref<File | null>(null)
 const selectedImportFileName = ref('')
+const manualOauthForm = ref({
+  email: '',
+  password: '',
+  sessionId: '',
+  authorizeUrl: '',
+  callbackUrl: '',
+  clientId: '',
+  redirectUri: '',
+  expiresIn: 0,
+  running: false,
+})
 const graphReauthDialog = ref({
   open: false,
   email: '',
@@ -1025,6 +1114,10 @@ const allAccounts = computed(() => dashboard.value?.accounts || [])
 const allMails = computed(() => dashboard.value?.mails || [])
 const customGroups = computed<GroupDefinition[]>(() => dashboard.value?.settings.custom_groups || [])
 const customTags = computed<TagDefinition[]>(() => dashboard.value?.settings.custom_tags || [])
+const oauthSettingsReady = computed(() => {
+  const settings = dashboard.value?.settings
+  return Boolean(settings?.oauth_client_id?.trim() && settings?.oauth_redirect_uri?.trim())
+})
 
 const groupOptions = computed<GroupOption[]>(() => {
   const options: GroupOption[] = []
@@ -1514,6 +1607,17 @@ function triggerImport() {
   importText.value = ''
   selectedImportFile.value = null
   selectedImportFileName.value = ''
+  manualOauthForm.value = {
+    email: '',
+    password: '',
+    sessionId: '',
+    authorizeUrl: '',
+    callbackUrl: '',
+    clientId: '',
+    redirectUri: '',
+    expiresIn: 0,
+    running: false,
+  }
 }
 
 function stopGraphReauthPolling() {
@@ -1665,7 +1769,71 @@ async function handleImportFile(event: Event) {
   input.value = ''
 }
 
+async function copyManualAuthorizeUrl() {
+  if (!manualOauthForm.value.authorizeUrl) return
+  try {
+    await navigator.clipboard.writeText(manualOauthForm.value.authorizeUrl)
+    showSuccess('已复制授权链接')
+  } catch {
+    showError('复制授权链接失败')
+  }
+}
+
+async function startManualOauthFlow() {
+  if (!oauthSettingsReady.value) {
+    showError('请先在系统设置中配置 Client ID 和 Redirect URI')
+    return
+  }
+  const email = manualOauthForm.value.email.trim()
+  if (!email || !email.includes('@')) {
+    showError('请输入正确的邮箱地址')
+    return
+  }
+  manualOauthForm.value.running = true
+  try {
+    const response = await startManualOauth(email, manualOauthForm.value.password)
+    manualOauthForm.value = {
+      ...manualOauthForm.value,
+      sessionId: response.data.session_id,
+      authorizeUrl: response.data.authorize_url,
+      clientId: response.data.client_id,
+      redirectUri: response.data.redirect_uri,
+      expiresIn: response.data.expires_in,
+    }
+    showSuccess('授权链接已生成，请按说明完成微软授权')
+  } catch (error: any) {
+    showError(error?.response?.data?.detail || '生成授权链接失败')
+  } finally {
+    manualOauthForm.value.running = false
+  }
+}
+
 async function submitImport() {
+  if (importMode.value === 'manual') {
+    if (!manualOauthForm.value.sessionId || !manualOauthForm.value.authorizeUrl) {
+      showError('请先生成授权链接')
+      return
+    }
+    if (!manualOauthForm.value.callbackUrl.trim()) {
+      showError('请粘贴完整回调地址')
+      return
+    }
+    manualOauthForm.value.running = true
+    try {
+      const response = await completeManualOauth(
+        manualOauthForm.value.sessionId,
+        manualOauthForm.value.callbackUrl.trim(),
+      )
+      showSuccess(response.message)
+      importDialogOpen.value = false
+      await refreshState(true)
+    } catch (error: any) {
+      showError(error?.response?.data?.detail || '微软授权添加失败')
+    } finally {
+      manualOauthForm.value.running = false
+    }
+    return
+  }
   try {
     let payloadFile: File | null = null
     if (importMode.value === 'text') {
