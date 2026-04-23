@@ -13,6 +13,7 @@ import urllib.request
 import zipfile
 from dataclasses import asdict
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from .imap_logic import (
     fetch_mail_body,
@@ -149,6 +150,9 @@ class MailManager:
             raise ValueError("该标签名称为保留名称")
         return name
 
+    def _now_shanghai(self) -> dt.datetime:
+        return dt.datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+
     def _telegram_ready(self) -> bool:
         return (
             self.settings.telegram_enabled
@@ -179,8 +183,10 @@ class MailManager:
 
     def send_test_telegram_notification(self) -> None:
         text = (
-            "EasyMail 测试通知\n"
-            f"时间：{format_shanghai_time(dt.datetime.now())}\n"
+            "EasyMail 通知\n"
+            "====================\n"
+            "🧪 测试通知\n"
+            f"🕒 时间：{format_shanghai_time(self._now_shanghai())}\n"
             "如果你收到这条消息，说明 Telegram Bot 配置可用。"
         )
         self._send_telegram_message(text)
@@ -192,10 +198,12 @@ class MailManager:
 
     def _notify_new_mail_instant(self, account: MailAccount, item: MailItem) -> None:
         text = (
-            "收到一封新邮件\n"
-            f"分组：{account.group_name or '未分组'}\n"
-            f"邮箱：{account.email}\n"
-            f"邮件主题：{item.subject}"
+            "EasyMail 通知\n"
+            "====================\n"
+            "📬 收到一封新邮件\n"
+            f"📁 分组：{account.group_name or '未分组'}\n"
+            f"📮 邮箱：{account.email}\n"
+            f"📝 主题：{item.subject}"
         )
         self._send_telegram_message(text)
 
@@ -211,7 +219,7 @@ class MailManager:
                 except Exception as exc:
                     self.log_event("error", "notification", "telegram_instant_failed", account.email, "新邮件 Telegram 通知失败", {"error": str(exc)})
             return
-        now_text = format_shanghai_time(dt.datetime.now())
+        now_text = format_shanghai_time(self._now_shanghai())
         for item in items:
             self.pending_mail_notifications.append(
                 {
@@ -237,13 +245,15 @@ class MailManager:
             self.last_mail_summary_sent_at = now
             self._persist_scheduler_state()
         lines = [
-            f"收到 {len(items)} 封新邮件",
-            f"监听分组：{self.settings.telegram_mail_group if self.settings.telegram_mail_group != '__all__' else '全部邮箱'}",
+            "EasyMail 通知",
+            "====================",
+            f"📬 收到 {len(items)} 封新邮件",
+            f"📁 监听分组：{self.settings.telegram_mail_group if self.settings.telegram_mail_group != '__all__' else '全部邮箱'}",
         ]
         for item in items[:20]:
-            lines.append(f"{item['email']} | {item['subject']}")
+            lines.append(f"• {item['email']} | {item['subject']}")
         if len(items) > 20:
-            lines.append(f"... 其余 {len(items) - 20} 封未展开")
+            lines.append(f"… 其余 {len(items) - 20} 封未展开")
         try:
             self._send_telegram_message("\n".join(lines))
             self.log_event("info", "notification", "telegram_summary", "telegram", "发送 Telegram 邮件汇总通知", {"count": len(items)})
@@ -1075,7 +1085,7 @@ class MailManager:
                 f"{account.email}---{account.password}---{account.auth_code_or_client_id}---{account.token}"
                 for account in accounts
             ]
-        file_name = f"easymail-export-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+        file_name = f"easymail-export-{self._now_shanghai().strftime('%Y%m%d-%H%M%S')}.txt"
         return ("\n".join(lines), file_name)
 
     def backup_accounts_now(self, trigger_source: str = "manual") -> dict:
@@ -1092,7 +1102,8 @@ class MailManager:
             if not backup_dir.is_absolute():
                 backup_dir = self.storage.base_dir / backup_dir
             backup_dir.mkdir(parents=True, exist_ok=True)
-            timestamp = dt.datetime.now().strftime('%Y%m%d-%H%M%S')
+            shanghai_now = self._now_shanghai()
+            timestamp = shanghai_now.strftime('%Y%m%d-%H%M%S')
             file_path = backup_dir / f"easymail-backup-{timestamp}.zip"
             account_lines = [
                 f"{account.email}---{account.password}---{account.auth_code_or_client_id}---{account.token}"
@@ -1100,7 +1111,7 @@ class MailManager:
             ]
             manifest = {
                 "app": "EasyMail",
-                "created_at": dt.datetime.utcnow().isoformat(),
+                "created_at": shanghai_now.isoformat(),
                 "trigger_source": trigger_source,
                 "account_count": len(accounts_payload),
                 "files": [
@@ -1148,9 +1159,11 @@ class MailManager:
                     self._send_telegram_message(
                         "\n".join(
                             [
-                                "自动任务：备份，已完成",
-                                f"文件名：{file_path.name}",
-                                f"备份时间：{format_shanghai_time(dt.datetime.now())}",
+                                "EasyMail 通知",
+                                "====================",
+                                "💾 自动任务：备份已完成",
+                                f"📦 文件名：{file_path.name}",
+                                f"🕒 备份时间：{format_shanghai_time(shanghai_now)}",
                             ]
                         )
                     )
@@ -1311,7 +1324,7 @@ class MailManager:
                     account.status = "登录失败"
                     account.last_error = err
                     self.log_event("error", "auth", "login_failed", account.email, "邮箱登录失败", {"error": err})
-                account.last_check = format_shanghai_time(dt.datetime.now())
+                account.last_check = format_shanghai_time(self._now_shanghai())
                 self._save_accounts_state()
                 self.login_done += 1
                 self.login_busy_email = ""
@@ -1330,7 +1343,7 @@ class MailManager:
             with self.lock:
                 account.unseen_count = unseen
                 account.mails = mails
-                account.last_check = format_shanghai_time(dt.datetime.now())
+                account.last_check = format_shanghai_time(self._now_shanghai())
                 new_items = [item for item in mails if item.local_key not in existing_keys]
                 if "成功" in message:
                     account.status = "登录成功"
