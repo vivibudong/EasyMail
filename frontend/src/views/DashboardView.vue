@@ -182,7 +182,7 @@
                     class="mt-1 inline-block h-2 w-2 rounded-full"
                     :style="{ backgroundColor: account.flag_color || '#D6EAF8' }"
                   ></span>
-                  <div class="min-w-0 flex-1 text-left">
+                  <div class="min-w-0 flex-1 text-left min-h-[54px]">
                     <div class="truncate text-[12px] font-medium" :class="statusTextClass(account.status)">
                       {{ account.index }}. {{ account.email }}
                     </div>
@@ -194,22 +194,24 @@
                         未读 {{ account.unseen_count }}
                       </span>
                     </div>
-                    <div v-if="visibleAccountTags(account).length" class="mt-1 flex flex-wrap gap-1">
-                      <span
-                        v-for="tagName in visibleAccountTags(account)"
-                        :key="tagName"
-                        class="inline-flex items-center gap-1 rounded-full px-1.5 py-0 text-[10px]"
-                        :style="tagPillStyle(tagName)"
-                      >
-                        <span class="inline-block h-1.5 w-1.5 rounded-full" :style="{ backgroundColor: tagColor(tagName) }"></span>
-                        {{ tagName }}
-                      </span>
-                      <span
-                        v-if="account.tags.length > visibleAccountTags(account).length"
-                        class="text-[10px] text-gray-400 dark:text-dark-500"
-                      >
-                        +{{ account.tags.length - visibleAccountTags(account).length }}
-                      </span>
+                    <div class="mt-1 flex min-h-[16px] items-center gap-1 overflow-hidden whitespace-nowrap">
+                      <template v-if="visibleAccountTags(account).length">
+                        <span
+                          v-for="tagName in visibleAccountTags(account)"
+                          :key="tagName"
+                          class="inline-flex max-w-[92px] items-center gap-1 truncate rounded-full px-1.5 py-0 text-[10px]"
+                          :style="tagPillStyle(tagName)"
+                        >
+                          <span class="inline-block h-1.5 w-1.5 rounded-full" :style="{ backgroundColor: tagColor(tagName) }"></span>
+                          {{ tagName }}
+                        </span>
+                        <span
+                          v-if="account.tags.length > visibleAccountTags(account).length"
+                          class="flex-shrink-0 text-[10px] text-gray-400 dark:text-dark-500"
+                        >
+                          +{{ account.tags.length - visibleAccountTags(account).length }}
+                        </span>
+                      </template>
                     </div>
                   </div>
                   <button
