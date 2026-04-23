@@ -5,9 +5,8 @@
     :metrics="headerMetrics"
     :non-success-accounts="nonSuccessAccounts"
     :queue-details="queueDetails"
-    :show-task-button="true"
+    :show-task-button="false"
     @show-account-detail="handleShowAccountDetail"
-    @open-task-center="openTaskCenter"
   >
     <div class="h-[calc(100vh-74px)] min-h-[calc(100vh-74px)]">
       <section class="card flex h-full flex-col overflow-hidden">
@@ -1713,12 +1712,6 @@ async function pollGraphReauth(manual = false) {
       showError(error?.response?.data?.detail || 'Graph 授权状态检查失败')
     }
   }
-}
-
-async function openTaskCenter() {
-  taskCenterOpen.value = true
-  taskSettingsDirty.value = false
-  await loadTokenRefreshHistory()
 }
 
 async function loadTokenRefreshHistory() {

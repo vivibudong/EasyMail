@@ -1,12 +1,12 @@
 <template>
-  <AppLayout title="系统设置" description="按模块管理导入规则、微软授权和通知配置。">
+  <AppLayout title="系统设置" description="按模块管理导入规则、阅读偏好、通知与自动任务。">
     <div class="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
       <aside class="card p-3">
         <div class="space-y-1">
           <button
             v-for="item in sections"
             :key="item.key"
-            class="flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left text-sm transition-colors"
+            class="flex w-full items-center rounded-xl px-3 py-2.5 text-left text-sm transition-colors"
             :class="
               currentSection === item.key
                 ? 'bg-primary-50 text-primary-700 dark:bg-primary-900/10 dark:text-primary-300'
@@ -15,7 +15,6 @@
             @click="switchSection(item.key)"
           >
             <span>{{ item.label }}</span>
-            <span class="text-xs text-gray-400">{{ item.hint }}</span>
           </button>
         </div>
       </aside>
@@ -25,22 +24,17 @@
           <div class="card-header">
             <h2 class="text-lg font-semibold text-gray-900 dark:text-white">导入规则</h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
-              配置文本导入行为、分隔符和基础显示偏好。
+              配置文本导入行为和分隔符规则。
             </p>
           </div>
 
-          <div class="card-body grid gap-5 md:grid-cols-2">
+          <div class="card-body grid gap-5">
             <label class="space-y-2">
               <span class="input-label mb-0">注释前缀</span>
               <input v-model="form.txt_comment_prefix" class="input" type="text" />
             </label>
 
-            <label class="space-y-2">
-              <span class="input-label mb-0">邮件显示上限</span>
-              <input v-model.number="form.mail_list_limit" class="input" type="number" min="0" />
-            </label>
-
-            <div class="space-y-2 md:col-span-2">
+            <div class="space-y-2">
               <span class="input-label mb-0">邮箱导入分隔符</span>
               <div class="rounded-xl border border-gray-200 p-3 dark:border-dark-700">
                 <div class="mb-3 flex flex-wrap gap-2">
@@ -69,10 +63,18 @@
               <input v-model="form.txt_skip_first_line" type="checkbox" />
               导入时跳过首行
             </label>
-            <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-dark-300">
-              <input v-model="form.startup_auto_login" type="checkbox" />
-              后端启动后自动登录已保存账号
-            </label>
+          </div>
+        </section>
+
+        <section v-else-if="currentSection === 'reading'" class="card">
+          <div class="card-header">
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">阅读偏好</h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
+              控制打开邮件后的阅读行为。
+            </p>
+          </div>
+
+          <div class="card-body">
             <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-dark-300">
               <input v-model="form.mark_read_on_open" type="checkbox" />
               点击邮件后自动标记为已读
@@ -108,7 +110,7 @@
           </div>
         </section>
 
-        <section v-else class="card">
+        <section v-else-if="currentSection === 'notifications'" class="card">
           <div class="card-header">
             <h2 class="text-lg font-semibold text-gray-900 dark:text-white">通知配置</h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
@@ -176,6 +178,115 @@
           </div>
         </section>
 
+        <section v-else-if="currentSection === 'refresh'" class="card">
+          <div class="card-header">
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">邮箱刷新</h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
+              管理自动登录、定时收件和 Token 刷新任务。
+            </p>
+          </div>
+
+          <div class="card-body grid gap-5 md:grid-cols-2">
+            <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-dark-300 md:col-span-2">
+              <input v-model="form.startup_auto_login" type="checkbox" />
+              后端启动后自动登录已保存账号
+            </label>
+            <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-dark-300">
+              <input v-model="form.auto_receive_enabled" type="checkbox" />
+              启用定时收件
+            </label>
+            <label class="space-y-2">
+              <span class="input-label mb-0">收件间隔（分钟）</span>
+              <input v-model.number="form.auto_receive_interval_minutes" class="input" type="number" min="5" />
+            </label>
+            <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-dark-300">
+              <input v-model="form.token_refresh_enabled" type="checkbox" />
+              启用定时 Token 刷新
+            </label>
+            <label class="space-y-2">
+              <span class="input-label mb-0">Token 刷新间隔（分钟）</span>
+              <input v-model.number="form.token_refresh_interval_minutes" class="input" type="number" min="5" />
+            </label>
+          </div>
+
+          <div class="card-footer space-y-4">
+            <div class="flex flex-wrap gap-3">
+              <button class="btn btn-secondary" :disabled="runningTokenRefresh" @click="handleRunTokenRefresh">
+                {{ runningTokenRefresh ? '执行中...' : '立即全量刷新 Token' }}
+              </button>
+            </div>
+            <div class="space-y-2">
+              <div class="text-sm font-medium text-gray-900 dark:text-white">Token 刷新历史</div>
+              <div class="max-h-72 space-y-2 overflow-y-auto">
+                <div
+                  v-for="item in tokenRefreshHistory"
+                  :key="item.id"
+                  class="rounded-xl border border-gray-100 px-3 py-2 text-xs dark:border-dark-700"
+                >
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="font-medium text-gray-900 dark:text-white">{{ item.created_at }}</span>
+                    <span class="text-gray-500 dark:text-dark-400">{{ item.trigger_source }}</span>
+                  </div>
+                  <div class="mt-1 text-gray-500 dark:text-dark-400">
+                    成功 {{ item.payload.success_count || 0 }} / 失败 {{ item.payload.failed_count || 0 }}
+                  </div>
+                </div>
+                <div v-if="!tokenRefreshHistory.length" class="text-xs text-gray-500 dark:text-dark-400">
+                  暂无刷新历史
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section v-else class="card">
+          <div class="card-header">
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">备份</h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
+              管理自动备份、完整备份 ZIP 及恢复流程。
+            </p>
+          </div>
+
+          <div class="card-body grid gap-5 md:grid-cols-2">
+            <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-dark-300 md:col-span-2">
+              <input v-model="form.backup_enabled" type="checkbox" />
+              启用定期备份
+            </label>
+            <label class="space-y-2">
+              <span class="input-label mb-0">备份间隔（分钟）</span>
+              <input v-model.number="form.backup_interval_minutes" class="input" type="number" min="10" />
+            </label>
+            <label class="space-y-2">
+              <span class="input-label mb-0">最大保留份数</span>
+              <input v-model.number="form.backup_keep_count" class="input" type="number" min="1" />
+            </label>
+            <label class="space-y-2 md:col-span-2">
+              <span class="input-label mb-0">备份目录</span>
+              <input v-model="form.backup_directory" class="input" type="text" />
+            </label>
+          </div>
+
+          <div class="card-footer space-y-4">
+            <div class="flex flex-wrap gap-3">
+              <button class="btn btn-secondary" :disabled="runningBackup" @click="handleRunBackup">
+                {{ runningBackup ? '执行中...' : '立即备份账号' }}
+              </button>
+              <button class="btn btn-secondary" @click="restoreBackupInput?.click()">恢复备份</button>
+              <input
+                ref="restoreBackupInput"
+                class="hidden"
+                type="file"
+                accept=".zip,application/zip"
+                @change="handleRestoreBackupFile"
+              />
+            </div>
+            <div class="space-y-2 text-xs leading-6 text-gray-500 dark:text-dark-400">
+              <p>完整备份会生成一个 ZIP，内含账号明文备份、结构化账号备份和系统设置备份。</p>
+              <p>恢复时不会恢复邮件缓存、正文缓存和已读状态，只恢复账号与设置，并自动重新登录。</p>
+            </div>
+          </div>
+        </section>
+
         <section class="card p-6">
           <div class="flex flex-wrap items-center gap-3">
             <button class="btn btn-primary" :disabled="saving" @click="handleSave">
@@ -194,7 +305,15 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getSettings, saveSettings, sendTestNotification } from '@/api/dashboard'
+import {
+  getSettings,
+  getTokenRefreshHistory,
+  restoreAccountBackup,
+  runAccountBackup,
+  runTokenRefresh,
+  saveSettings,
+  sendTestNotification,
+} from '@/api/dashboard'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import { useToastStore } from '@/stores/toast'
 import type { AppSettings } from '@/types'
@@ -202,9 +321,12 @@ import type { AppSettings } from '@/types'
 const route = useRoute()
 const router = useRouter()
 const sections = [
-  { key: 'import', label: '导入规则', hint: 'TXT / 分隔符' },
-  { key: 'oauth', label: '微软授权', hint: 'Client ID / URI' },
-  { key: 'notifications', label: '通知', hint: 'Telegram' },
+  { key: 'import', label: '导入规则' },
+  { key: 'reading', label: '阅读偏好' },
+  { key: 'oauth', label: '微软授权' },
+  { key: 'notifications', label: '通知' },
+  { key: 'refresh', label: '邮箱刷新' },
+  { key: 'backup', label: '备份' },
 ]
 
 const form = reactive<AppSettings>({
@@ -238,8 +360,19 @@ const form = reactive<AppSettings>({
 
 const saving = ref(false)
 const testingNotification = ref(false)
+const runningTokenRefresh = ref(false)
+const runningBackup = ref(false)
 const newDelimiter = ref('')
 const toastStore = useToastStore()
+const restoreBackupInput = ref<HTMLInputElement | null>(null)
+const tokenRefreshHistory = ref<
+  Array<{
+    id: number
+    created_at: string
+    trigger_source: string
+    payload: Record<string, any>
+  }>
+>([])
 
 const currentSection = computed(() => {
   const section = String(route.query.section || 'import')
@@ -251,6 +384,7 @@ const groupOptions = computed(() => ['未分组', ...form.custom_groups.map((ite
 onMounted(async () => {
   const response = await getSettings()
   Object.assign(form, response.data)
+  await loadTokenRefreshHistory()
 })
 
 watch(
@@ -306,6 +440,56 @@ async function handleTestNotification() {
     toastStore.push(error?.response?.data?.detail || '测试通知发送失败', 'error')
   } finally {
     testingNotification.value = false
+  }
+}
+
+async function loadTokenRefreshHistory() {
+  try {
+    const response = await getTokenRefreshHistory()
+    tokenRefreshHistory.value = response.data.items
+  } catch (error: any) {
+    toastStore.push(error?.response?.data?.detail || '加载刷新历史失败', 'error')
+  }
+}
+
+async function handleRunTokenRefresh() {
+  runningTokenRefresh.value = true
+  try {
+    const response = await runTokenRefresh()
+    toastStore.push(response.message, 'success')
+    await loadTokenRefreshHistory()
+  } catch (error: any) {
+    toastStore.push(error?.response?.data?.detail || 'Token 刷新失败', 'error')
+  } finally {
+    runningTokenRefresh.value = false
+  }
+}
+
+async function handleRunBackup() {
+  runningBackup.value = true
+  try {
+    const response = await runAccountBackup()
+    toastStore.push(`${response.message}：${response.data.path}`, 'success')
+  } catch (error: any) {
+    toastStore.push(error?.response?.data?.detail || '账号备份失败', 'error')
+  } finally {
+    runningBackup.value = false
+  }
+}
+
+async function handleRestoreBackupFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  try {
+    const response = await restoreAccountBackup(file)
+    toastStore.push(
+      `${response.message}：恢复 ${response.data.accounts} 个账号，${response.data.custom_groups} 个分组，${response.data.custom_tags} 个标签`,
+      'success',
+    )
+  } catch (error: any) {
+    toastStore.push(error?.response?.data?.detail || '恢复备份失败', 'error')
   }
 }
 </script>
