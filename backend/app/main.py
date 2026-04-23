@@ -170,6 +170,13 @@ class SettingsRequest(BaseModel):
     backup_keep_count: int = 10
     oauth_client_id: str = ""
     oauth_redirect_uri: str = "http://localhost:8765/callback"
+    telegram_enabled: bool = False
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    telegram_mail_mode: str = "hourly"
+    telegram_mail_group: str = "__all__"
+    telegram_mail_summary_minutes: int = 60
+    telegram_notify_backup: bool = False
 
 
 def ok(message: str, data: Optional[dict] = None) -> dict:
@@ -875,6 +882,17 @@ async def restore_backup(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ok("备份已恢复，账号正在重新登录", result)
+
+
+@app.post("/api/notifications/test")
+def send_test_notification(current_user: dict = Depends(get_current_user)) -> dict:
+    try:
+        manager.send_test_telegram_notification()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Telegram 发送失败: {exc}") from exc
+    return ok("Telegram 测试通知已发送")
 
 
 @app.get("/api/logs")

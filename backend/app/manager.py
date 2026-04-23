@@ -8,6 +8,8 @@ import queue
 import re
 import threading
 import time
+import urllib.parse
+import urllib.request
 import zipfile
 from dataclasses import asdict
 from typing import Optional
@@ -73,10 +75,12 @@ class MailManager:
         self.last_auto_receive_run_at = float(task_state.get("last_auto_receive_run_at", 0.0) or 0.0)
         self.last_token_refresh_run_at = float(task_state.get("last_token_refresh_run_at", 0.0) or 0.0)
         self.last_backup_run_at = float(task_state.get("last_backup_run_at", 0.0) or 0.0)
+        self.last_mail_summary_sent_at = float(task_state.get("last_mail_summary_sent_at", time.time()) or time.time())
 
         self.settings.custom_groups = self._sort_groups(self.settings.custom_groups)
         self.settings.custom_tags = self._sort_tags(self.settings.custom_tags)
         self.settings.import_delimiters = normalize_import_delimiters(self.settings.import_delimiters)
+        self.pending_mail_notifications: list[dict] = []
 
         repaired_accounts = self._repair_legacy_imported_accounts()
         for account in self.accounts:
@@ -113,6 +117,7 @@ class MailManager:
                 "last_auto_receive_run_at": self.last_auto_receive_run_at,
                 "last_token_refresh_run_at": self.last_token_refresh_run_at,
                 "last_backup_run_at": self.last_backup_run_at,
+                "last_mail_summary_sent_at": self.last_mail_summary_sent_at,
             },
         )
 
@@ -143,6 +148,107 @@ class MailManager:
         if name in {"全部", "星标", "分组", "标签", "未分组"}:
             raise ValueError("该标签名称为保留名称")
         return name
+
+    def _telegram_ready(self) -> bool:
+        return (
+            self.settings.telegram_enabled
+            and bool(self.settings.telegram_bot_token.strip())
+            and bool(self.settings.telegram_chat_id.strip())
+        )
+
+    def _send_telegram_message(self, text: str) -> None:
+        if not self._telegram_ready():
+            raise ValueError("Telegram 未配置完整")
+        body = urllib.parse.urlencode(
+            {
+                "chat_id": self.settings.telegram_chat_id.strip(),
+                "text": text,
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"https://api.telegram.org/bot{self.settings.telegram_bot_token.strip()}/sendMessage",
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+        payload = json.loads(raw)
+        if not payload.get("ok"):
+            raise ValueError(str(payload))
+
+    def send_test_telegram_notification(self) -> None:
+        text = (
+            "EasyMail 测试通知\n"
+            f"时间：{format_shanghai_time(dt.datetime.now())}\n"
+            "如果你收到这条消息，说明 Telegram Bot 配置可用。"
+        )
+        self._send_telegram_message(text)
+        self.log_event("info", "notification", "telegram_test", "telegram", "发送 Telegram 测试通知")
+
+    def _should_notify_account(self, account: MailAccount) -> bool:
+        target_group = self.settings.telegram_mail_group.strip() or "__all__"
+        return target_group == "__all__" or (account.group_name or "未分组") == target_group
+
+    def _notify_new_mail_instant(self, account: MailAccount, item: MailItem) -> None:
+        text = (
+            "收到一封新邮件\n"
+            f"分组：{account.group_name or '未分组'}\n"
+            f"邮箱：{account.email}\n"
+            f"邮件主题：{item.subject}"
+        )
+        self._send_telegram_message(text)
+
+    def _queue_mail_notifications(self, account: MailAccount, items: list[MailItem]) -> None:
+        if not self._telegram_ready():
+            return
+        if self.settings.telegram_mail_mode == "off" or not self._should_notify_account(account):
+            return
+        if self.settings.telegram_mail_mode == "instant":
+            for item in items:
+                try:
+                    self._notify_new_mail_instant(account, item)
+                except Exception as exc:
+                    self.log_event("error", "notification", "telegram_instant_failed", account.email, "新邮件 Telegram 通知失败", {"error": str(exc)})
+            return
+        now_text = format_shanghai_time(dt.datetime.now())
+        for item in items:
+            self.pending_mail_notifications.append(
+                {
+                    "group_name": account.group_name or "未分组",
+                    "email": account.email,
+                    "subject": item.subject,
+                    "received_at": now_text,
+                }
+            )
+
+    def flush_mail_summary_notifications(self, force: bool = False) -> None:
+        with self.lock:
+            if not self._telegram_ready() or self.settings.telegram_mail_mode != "hourly":
+                return
+            if not self.pending_mail_notifications:
+                return
+            interval_minutes = max(5, int(self.settings.telegram_mail_summary_minutes or 60))
+            now = time.time()
+            if not force and now - self.last_mail_summary_sent_at < interval_minutes * 60:
+                return
+            items = self.pending_mail_notifications[:]
+            self.pending_mail_notifications.clear()
+            self.last_mail_summary_sent_at = now
+            self._persist_scheduler_state()
+        lines = [
+            f"收到 {len(items)} 封新邮件",
+            f"监听分组：{self.settings.telegram_mail_group if self.settings.telegram_mail_group != '__all__' else '全部邮箱'}",
+        ]
+        for item in items[:20]:
+            lines.append(f"{item['email']} | {item['subject']}")
+        if len(items) > 20:
+            lines.append(f"... 其余 {len(items) - 20} 封未展开")
+        try:
+            self._send_telegram_message("\n".join(lines))
+            self.log_event("info", "notification", "telegram_summary", "telegram", "发送 Telegram 邮件汇总通知", {"count": len(items)})
+        except Exception as exc:
+            self.log_event("error", "notification", "telegram_summary_failed", "telegram", "发送 Telegram 邮件汇总通知失败", {"error": str(exc), "count": len(items)})
 
     def _sort_groups(self, groups: list[GroupDefinition]) -> list[GroupDefinition]:
         return sorted(groups, key=lambda item: (-item.priority, item.name.lower()))
@@ -778,6 +884,54 @@ class MailManager:
                 payload.get("oauth_redirect_uri", self.settings.oauth_redirect_uri)
                 or "http://localhost:8765/callback"
             ).strip()
+            self.settings.telegram_enabled = bool(
+                payload.get("telegram_enabled", self.settings.telegram_enabled)
+            )
+            self.settings.telegram_bot_token = str(
+                payload.get("telegram_bot_token", self.settings.telegram_bot_token) or ""
+            ).strip()
+            self.settings.telegram_chat_id = str(
+                payload.get("telegram_chat_id", self.settings.telegram_chat_id) or ""
+            ).strip()
+            self.settings.telegram_mail_mode = str(
+                payload.get("telegram_mail_mode", self.settings.telegram_mail_mode) or "hourly"
+            ).strip() or "hourly"
+            if self.settings.telegram_mail_mode not in {"off", "instant", "hourly"}:
+                self.settings.telegram_mail_mode = "hourly"
+            self.settings.telegram_mail_group = str(
+                payload.get("telegram_mail_group", self.settings.telegram_mail_group) or "__all__"
+            ).strip() or "__all__"
+            self.settings.telegram_mail_summary_minutes = max(
+                5,
+                int(payload.get("telegram_mail_summary_minutes", self.settings.telegram_mail_summary_minutes) or 60),
+            )
+            self.settings.telegram_notify_backup = bool(
+                payload.get("telegram_notify_backup", self.settings.telegram_notify_backup)
+            )
+            self.settings.telegram_enabled = bool(
+                payload.get("telegram_enabled", self.settings.telegram_enabled)
+            )
+            self.settings.telegram_bot_token = str(
+                payload.get("telegram_bot_token", self.settings.telegram_bot_token) or ""
+            ).strip()
+            self.settings.telegram_chat_id = str(
+                payload.get("telegram_chat_id", self.settings.telegram_chat_id) or ""
+            ).strip()
+            self.settings.telegram_mail_mode = str(
+                payload.get("telegram_mail_mode", self.settings.telegram_mail_mode) or "hourly"
+            ).strip() or "hourly"
+            if self.settings.telegram_mail_mode not in {"off", "instant", "hourly"}:
+                self.settings.telegram_mail_mode = "hourly"
+            self.settings.telegram_mail_group = str(
+                payload.get("telegram_mail_group", self.settings.telegram_mail_group) or "__all__"
+            ).strip() or "__all__"
+            self.settings.telegram_mail_summary_minutes = max(
+                5,
+                int(payload.get("telegram_mail_summary_minutes", self.settings.telegram_mail_summary_minutes) or 60),
+            )
+            self.settings.telegram_notify_backup = bool(
+                payload.get("telegram_notify_backup", self.settings.telegram_notify_backup)
+            )
 
             groups_raw = payload.get("custom_groups", settings_to_dict(self.settings)["custom_groups"])
             next_groups: list[GroupDefinition] = []
@@ -989,6 +1143,19 @@ class MailManager:
                     "accounts": len(accounts_payload),
                 },
             )
+            if self.settings.telegram_notify_backup and self._telegram_ready():
+                try:
+                    self._send_telegram_message(
+                        "\n".join(
+                            [
+                                "自动任务：备份，已完成",
+                                f"文件名：{file_path.name}",
+                                f"备份时间：{format_shanghai_time(dt.datetime.now())}",
+                            ]
+                        )
+                    )
+                except Exception as exc:
+                    self.log_event("error", "notification", "telegram_backup_failed", "telegram", "备份 Telegram 通知失败", {"error": str(exc)})
             return {
                 "path": str(file_path),
                 "retained": min(len(backup_files), keep_count),
@@ -1121,6 +1288,7 @@ class MailManager:
                     and now - self.last_backup_run_at >= settings.backup_interval_minutes * 60
                 ):
                     self.backup_accounts_now(trigger_source="scheduled")
+                self.flush_mail_summary_notifications()
             except Exception:
                 pass
             self.scheduler_stop.wait(30)
@@ -1157,14 +1325,17 @@ class MailManager:
                 account.status = "收信中"
                 existing_mails = list(account.mails)
                 local_read_keys = set(self.local_read_keys)
+                existing_keys = {item.local_key for item in existing_mails}
             unseen, mails, message = fetch_mails_once(account, local_read_keys, existing_mails)
             with self.lock:
                 account.unseen_count = unseen
                 account.mails = mails
                 account.last_check = format_shanghai_time(dt.datetime.now())
+                new_items = [item for item in mails if item.local_key not in existing_keys]
                 if "成功" in message:
                     account.status = "登录成功"
                     account.last_error = ""
+                    self._queue_mail_notifications(account, new_items)
                     self.log_event("info", "mail_fetch", "receive_success", account.email, "收件成功", {"unseen": unseen, "method": account.auth_method})
                 else:
                     account.status = "收信失败"

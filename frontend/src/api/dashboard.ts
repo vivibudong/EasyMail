@@ -251,6 +251,11 @@ export async function saveSettings(settings: AppSettings) {
   return data
 }
 
+export async function sendTestNotification() {
+  const { data } = await apiClient.post<ApiResponse<Record<string, never>>>('/notifications/test')
+  return data
+}
+
 export async function runTokenRefresh() {
   const { data } = await apiClient.post<
     ApiResponse<{

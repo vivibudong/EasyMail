@@ -107,6 +107,13 @@ export interface AppSettings {
   backup_keep_count: number
   oauth_client_id: string
   oauth_redirect_uri: string
+  telegram_enabled: boolean
+  telegram_bot_token: string
+  telegram_chat_id: string
+  telegram_mail_mode: 'off' | 'instant' | 'hourly'
+  telegram_mail_group: string
+  telegram_mail_summary_minutes: number
+  telegram_notify_backup: boolean
 }
 
 export interface AuthUser {

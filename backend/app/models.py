@@ -86,6 +86,13 @@ class AppSettings:
     backup_keep_count: int = 10
     oauth_client_id: str = ""
     oauth_redirect_uri: str = "http://localhost:8765/callback"
+    telegram_enabled: bool = False
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    telegram_mail_mode: str = "hourly"
+    telegram_mail_group: str = "__all__"
+    telegram_mail_summary_minutes: int = 60
+    telegram_notify_backup: bool = False
 
 
 @dataclass
@@ -221,6 +228,13 @@ def settings_to_dict(settings: AppSettings) -> dict:
         "backup_keep_count": settings.backup_keep_count,
         "oauth_client_id": settings.oauth_client_id,
         "oauth_redirect_uri": settings.oauth_redirect_uri,
+        "telegram_enabled": settings.telegram_enabled,
+        "telegram_bot_token": settings.telegram_bot_token,
+        "telegram_chat_id": settings.telegram_chat_id,
+        "telegram_mail_mode": settings.telegram_mail_mode,
+        "telegram_mail_group": settings.telegram_mail_group,
+        "telegram_mail_summary_minutes": settings.telegram_mail_summary_minutes,
+        "telegram_notify_backup": settings.telegram_notify_backup,
     }
 
 
@@ -306,4 +320,11 @@ def settings_from_dict(data: dict) -> AppSettings:
             data.get("oauth_redirect_uri", "http://localhost:8765/callback")
             or "http://localhost:8765/callback"
         ),
+        telegram_enabled=bool(data.get("telegram_enabled", False)),
+        telegram_bot_token=str(data.get("telegram_bot_token", "") or ""),
+        telegram_chat_id=str(data.get("telegram_chat_id", "") or ""),
+        telegram_mail_mode=str(data.get("telegram_mail_mode", "hourly") or "hourly"),
+        telegram_mail_group=str(data.get("telegram_mail_group", "__all__") or "__all__"),
+        telegram_mail_summary_minutes=int(data.get("telegram_mail_summary_minutes", 60) or 60),
+        telegram_notify_backup=bool(data.get("telegram_notify_backup", False)),
     )
