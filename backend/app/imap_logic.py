@@ -39,6 +39,14 @@ def decode_text(raw_value: Optional[str]) -> str:
     return "".join(parts).strip()
 
 
+def format_sender_display(name: str, address: str) -> str:
+    clean_name = (name or "").strip().strip('"')
+    clean_address = (address or "").strip()
+    if clean_name and clean_address:
+        return f"{clean_name} <{clean_address}>"
+    return clean_address or clean_name or "(未知发件人)"
+
+
 def parse_email_date(raw_date: str) -> dt.datetime:
     if not raw_date:
         return dt.datetime(1970, 1, 1)
@@ -385,16 +393,14 @@ def fetch_mails_via_graph(
                 if existing_item.is_unread:
                     merged_unseen_total += 1
                 continue
-            sender = ""
+            sender_name = ""
+            sender_address = ""
             from_payload = message_item.get("from", {})
             if isinstance(from_payload, dict):
                 email_address = from_payload.get("emailAddress", {})
                 if isinstance(email_address, dict):
-                    sender = (
-                        email_address.get("name")
-                        or email_address.get("address")
-                        or ""
-                    )
+                    sender_name = str(email_address.get("name") or "")
+                    sender_address = str(email_address.get("address") or "")
             is_unread = not bool(message_item.get("isRead", False))
             if local_read_keys and local_key in local_read_keys:
                 is_unread = False
@@ -406,7 +412,7 @@ def fetch_mails_via_graph(
                 folder=folder_name,
                 local_key=local_key,
                 subject=str(message_item.get("subject") or "(无主题)"),
-                from_text=sender or "(未知发件人)",
+                from_text=format_sender_display(sender_name, sender_address),
                 date_text=format_shanghai_time(date_value),
                 date_value=date_value,
                 source="graph",
@@ -587,6 +593,8 @@ def fetch_mails_once(
                 if not header_block:
                     continue
                 msg = email.message_from_bytes(header_block)
+                raw_from = msg.get("From")
+                display_name, sender_address = email.utils.parseaddr(raw_from or "")
                 is_unread = True
                 if local_read_keys and local_key in local_read_keys:
                     is_unread = False
@@ -596,7 +604,7 @@ def fetch_mails_once(
                     folder=folder,
                     local_key=local_key,
                     subject=decode_text(msg.get("Subject")) or "(无主题)",
-                    from_text=decode_text(msg.get("From")) or "(未知发件人)",
+                    from_text=format_sender_display(decode_text(display_name), sender_address),
                     date_text="",
                     date_value=parse_email_date(decode_text(msg.get("Date"))),
                     source="imap",
