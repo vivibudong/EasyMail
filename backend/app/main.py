@@ -151,6 +151,10 @@ class MailStarRequest(BaseModel):
     is_starred: Optional[bool] = None
 
 
+class TranslateRequest(BaseModel):
+    text: str
+
+
 class SettingsRequest(BaseModel):
     auto_receive_interval: int = 120
     import_delimiters: list[str] = Field(default_factory=lambda: DEFAULT_IMPORT_DELIMITERS.copy())
@@ -270,6 +274,36 @@ def _get_graph_profile(access_token: str) -> dict:
     if not isinstance(payload, dict):
         raise ValueError(raw)
     return payload
+
+
+def _translate_to_chinese(text: str) -> str:
+    query = urllib.parse.urlencode(
+        {
+            "client": "gtx",
+            "sl": "auto",
+            "tl": "zh-CN",
+            "dt": "t",
+            "q": text,
+        }
+    )
+    request = urllib.request.Request(
+        f"https://translate.googleapis.com/translate_a/single?{query}",
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        raw = response.read().decode("utf-8", errors="replace")
+    payload = json.loads(raw)
+    if not isinstance(payload, list) or not payload or not isinstance(payload[0], list):
+        raise ValueError("翻译服务返回格式异常")
+    translated_parts: list[str] = []
+    for item in payload[0]:
+        if isinstance(item, list) and item:
+            translated_parts.append(str(item[0] or ""))
+    translated_text = "".join(translated_parts).strip()
+    if not translated_text:
+        raise ValueError("翻译结果为空")
+    return translated_text
 
 
 def _apply_graph_reauth_success(session: GraphReauthSession, token_payload: dict) -> None:
@@ -894,6 +928,21 @@ def send_test_notification(current_user: dict = Depends(get_current_user)) -> di
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Telegram 发送失败: {exc}") from exc
     return ok("Telegram 测试通知已发送")
+
+
+@app.post("/api/translate")
+def translate_text(
+    payload: TranslateRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    text = payload.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="正文为空，无法翻译")
+    try:
+        translated = _translate_to_chinese(text[:12000])
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"翻译失败: {exc}") from exc
+    return ok("翻译完成", {"translated_text": translated})
 
 
 @app.get("/api/logs")

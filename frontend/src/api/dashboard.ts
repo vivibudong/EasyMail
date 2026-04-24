@@ -258,6 +258,15 @@ export async function sendTestNotification() {
   return data
 }
 
+export async function translateText(text: string) {
+  const { data } = await apiClient.post<
+    ApiResponse<{
+      translated_text: string
+    }>
+  >('/translate', { text })
+  return data
+}
+
 export async function runTokenRefresh() {
   const { data } = await apiClient.post<
     ApiResponse<{

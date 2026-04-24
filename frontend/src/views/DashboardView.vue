@@ -307,6 +307,8 @@
                         </div>
                         <div class="mt-0.5 flex items-center gap-1.5 truncate text-[10px] text-gray-500 dark:text-dark-400">
                           <span class="badge px-2 py-0" :class="folderBadgeClass(mail.folder)">{{ mail.folder }}</span>
+                          <span class="truncate">{{ mail.from_text }}</span>
+                          <span>|</span>
                           <span>{{ mail.account_email }}</span>
                           <span>|</span>
                           <span>{{ mail.date_text }}</span>
@@ -354,7 +356,7 @@
                   <div class="truncate text-[11px] text-gray-500 dark:text-dark-400">
                     {{
                       selectedMailDetail
-                        ? `${selectedMailDetail.folder} | ${selectedMailDetail.account_email} | ${selectedMailDetail.date_text}`
+                        ? `${selectedMailDetail.folder} | ${selectedMailDetail.from_text} | ${selectedMailDetail.account_email} | ${selectedMailDetail.date_text}`
                         : '等待选择邮件'
                     }}
                   </div>
@@ -367,6 +369,14 @@
                     @click="handleToggleStar(selectedMailDetail)"
                   >
                     {{ selectedMailDetail.is_starred ? '★' : '☆' }}
+                  </button>
+                  <button
+                    v-if="selectedMailDetail?.body_text"
+                    class="btn btn-secondary btn-sm px-2 py-1"
+                    :disabled="translatingBody"
+                    @click="handleTranslateBody"
+                  >
+                    {{ showingTranslatedBody ? '查看原文' : translatingBody ? '翻译中...' : '翻译正文' }}
                   </button>
                   <button
                     v-if="selectedMailKey"
@@ -396,7 +406,7 @@
                   <div class="empty-state-title text-sm">请选择一封邮件</div>
                   <div class="empty-state-description text-xs">正文将被后台下载并写入本地缓存。</div>
                 </div>
-                <pre v-else class="mail-body">{{ selectedMailDetail.body_text || '(正文为空)' }}</pre>
+                <pre v-else class="mail-body">{{ displayedMailBody }}</pre>
               </div>
             </section>
           </div>
@@ -1006,6 +1016,7 @@ import {
   setAccountTags,
   startManualOauth,
   startGraphReauth,
+  translateText,
   toggleMailStar,
   updateAccount,
   updateGroup,
@@ -1049,6 +1060,9 @@ const selectedAccountEmail = ref<string | null>(null)
 const selectedMailKey = ref('')
 const selectedMailDetail = ref<MailItem | null>(null)
 const selectedBodyTask = ref<BodyTask | null>(null)
+const translatedMailBody = ref('')
+const showingTranslatedBody = ref(false)
+const translatingBody = ref(false)
 const checkedAccounts = ref<string[]>([])
 const fileInput = ref<HTMLInputElement | null>(null)
 const restoreBackupInput = ref<HTMLInputElement | null>(null)
@@ -1432,6 +1446,14 @@ const bodyStatusText = computed(() => {
   if (task.state === 'error') return `正文下载失败: ${task.status}`
   if (task.state === 'done') return '正文已缓存'
   return task.status || '等待任务'
+})
+
+const displayedMailBody = computed(() => {
+  if (!selectedMailDetail.value) return ''
+  if (showingTranslatedBody.value && translatedMailBody.value) {
+    return translatedMailBody.value
+  }
+  return selectedMailDetail.value.body_text || '(正文为空)'
 })
 
 const graphReauthStatusLabel = computed(() => {
@@ -2107,6 +2129,8 @@ function statusTextClass(status: string) {
 
 async function handleOpenMail(mail: MailItem) {
   selectedMailKey.value = mail.local_key
+  translatedMailBody.value = ''
+  showingTranslatedBody.value = false
   try {
     const response = await openMail(mail.local_key)
     selectedMailDetail.value = response.data.mail
@@ -2164,7 +2188,27 @@ function stopBodyPolling() {
 
 async function refreshMailBody() {
   if (!selectedMailDetail.value) return
+  translatedMailBody.value = ''
+  showingTranslatedBody.value = false
   await handleOpenMail(selectedMailDetail.value)
+}
+
+async function handleTranslateBody() {
+  if (!selectedMailDetail.value?.body_text) return
+  if (translatedMailBody.value) {
+    showingTranslatedBody.value = !showingTranslatedBody.value
+    return
+  }
+  translatingBody.value = true
+  try {
+    const response = await translateText(selectedMailDetail.value.body_text)
+    translatedMailBody.value = response.data.translated_text
+    showingTranslatedBody.value = true
+  } catch (error: any) {
+    showError(error?.response?.data?.detail || '正文翻译失败')
+  } finally {
+    translatingBody.value = false
+  }
 }
 
 async function handleReceiveAll() {
