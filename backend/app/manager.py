@@ -87,12 +87,17 @@ class MailManager:
         self.pending_mail_notifications: list[dict] = []
 
         repaired_accounts = self._repair_legacy_imported_accounts()
+        repaired_mail_cache = 0
         for account in self.accounts:
             if not account.group_name:
                 account.group_name = "未分组"
             account.mails = self.storage.load_mail_cache(account, self.local_read_keys)
+            account_cache_repairs = self._repair_mail_folder_cache(account)
+            repaired_mail_cache += account_cache_repairs
             if account.mails and account.status == "待登录":
                 account.status = "已缓存"
+            if account_cache_repairs:
+                self.storage.save_mail_cache(account)
         if repaired_accounts:
             self._save_accounts_state()
             self.log_event(
@@ -102,6 +107,15 @@ class MailManager:
                 "batch",
                 "修复旧导入账号字段",
                 {"count": repaired_accounts},
+            )
+        if repaired_mail_cache:
+            self.log_event(
+                "warning",
+                "mail_cache",
+                "repair_folder",
+                "batch",
+                "修复邮件文件夹缓存",
+                {"count": repaired_mail_cache},
             )
         self.rebuild_mail_pool()
         self._start_workers()
@@ -343,6 +357,28 @@ class MailManager:
             return "已删除"
         return folder_name
 
+    def _raw_imap_folder_from_key(self, item: MailItem) -> str:
+        parts = item.local_key.split("|", 2)
+        if len(parts) == 3 and parts[0] == item.account_email:
+            return parts[1]
+        return item.folder
+
+    def _repair_mail_folder_cache(self, account: MailAccount) -> int:
+        repaired = 0
+        for item in account.mails:
+            if item.source != "imap":
+                continue
+            raw_folder = self._raw_imap_folder_from_key(item)
+            if not raw_folder or raw_folder == item.folder:
+                continue
+            display_folder = self._folder_display_name(raw_folder)
+            if item.folder == display_folder:
+                item.folder = raw_folder
+                if raw_folder.upper() != "INBOX" and item.body_text:
+                    item.body_text = ""
+                repaired += 1
+        return repaired
+
     def _save_accounts_state(self) -> None:
         self.storage.save_accounts(self.accounts)
 
@@ -403,7 +439,6 @@ class MailManager:
         seen: set[str] = set()
         for account in self.accounts:
             for item in account.mails:
-                item.folder = self._folder_display_name(item.folder)
                 if item.local_key in seen:
                     continue
                 seen.add(item.local_key)
