@@ -823,6 +823,7 @@
                 <button class="tab" :class="{ 'tab-active': importMode === 'text' }" @click="importMode = 'text'">粘贴文本</button>
                 <button class="tab" :class="{ 'tab-active': importMode === 'file' }" @click="importMode = 'file'">选择文件</button>
                 <button class="tab" :class="{ 'tab-active': importMode === 'manual' }" @click="importMode = 'manual'">微软授权添加</button>
+                <button class="tab" :class="{ 'tab-active': importMode === 'gmail' }" @click="importMode = 'gmail'">Gmail 授权添加</button>
               </div>
 
               <div v-if="importMode === 'text'" class="space-y-2">
@@ -840,7 +841,7 @@
                 </div>
               </div>
 
-              <div v-else class="space-y-4">
+              <div v-else-if="importMode === 'manual'" class="space-y-4">
                 <div
                   class="rounded-2xl border px-4 py-3 text-sm"
                   :class="
@@ -912,10 +913,77 @@
                   ></textarea>
                 </label>
               </div>
+
+              <div v-else class="space-y-4">
+                <div
+                  class="rounded-2xl border px-4 py-3 text-sm"
+                  :class="
+                    gmailSettingsReady
+                      ? 'border-sky-200 bg-sky-50/80 text-sky-700 dark:border-sky-800/50 dark:bg-sky-900/10 dark:text-sky-300'
+                      : 'border-amber-200 bg-amber-50/80 text-amber-700 dark:border-amber-800/50 dark:bg-amber-900/10 dark:text-amber-300'
+                  "
+                >
+                  <div v-if="gmailSettingsReady">
+                    已读取系统设置中的 Gmail Client ID、Client Secret 与 Redirect URI。
+                  </div>
+                  <div v-else>
+                    请先到系统设置中填写 Gmail Client ID、Client Secret 与 Redirect URI，保存后才能使用 Gmail 授权添加。
+                  </div>
+                </div>
+
+                <label class="space-y-2">
+                  <span class="text-xs text-gray-500 dark:text-dark-400">Gmail 邮箱</span>
+                  <input v-model="gmailOauthForm.email" class="input" type="email" placeholder="输入待绑定的 Gmail 邮箱" />
+                </label>
+
+                <div class="grid gap-4 md:grid-cols-2">
+                  <div class="rounded-xl border border-gray-200 bg-gray-50/70 px-3 py-3 text-xs text-gray-600 dark:border-dark-700 dark:bg-dark-800/60 dark:text-dark-300">
+                    <div class="font-medium text-gray-900 dark:text-white">当前 Gmail Client ID</div>
+                    <div class="mt-1 break-all">{{ dashboard?.settings.gmail_client_id || '-' }}</div>
+                  </div>
+                  <div class="rounded-xl border border-gray-200 bg-gray-50/70 px-3 py-3 text-xs text-gray-600 dark:border-dark-700 dark:bg-dark-800/60 dark:text-dark-300">
+                    <div class="font-medium text-gray-900 dark:text-white">当前 Gmail Redirect URI</div>
+                    <div class="mt-1 break-all">{{ dashboard?.settings.gmail_redirect_uri || '-' }}</div>
+                  </div>
+                </div>
+
+                <div class="rounded-2xl border border-gray-200 p-4 dark:border-dark-700">
+                  <div class="mb-3 flex flex-wrap items-center gap-2">
+                    <button class="btn btn-primary" :disabled="gmailOauthForm.running || !gmailSettingsReady" @click="startGmailOauthFlow">
+                      生成 Gmail 授权链接
+                    </button>
+                    <button
+                      v-if="gmailOauthForm.authorizeUrl"
+                      class="btn btn-secondary"
+                      @click="copyGmailAuthorizeUrl"
+                    >
+                      复制授权链接
+                    </button>
+                  </div>
+                  <div class="space-y-2 text-xs leading-6 text-gray-500 dark:text-dark-400">
+                    <p>建议使用无痕窗口打开授权链接，避免 Google 账号 Cookie 复用导致绑定到错误邮箱。</p>
+                    <p>授权后如果 localhost 页面打不开是正常现象，请复制浏览器地址栏完整回调地址。</p>
+                    <p>系统会校验实际授权 Gmail 是否与预填邮箱一致，不一致则拒绝保存。</p>
+                  </div>
+                  <div v-if="gmailOauthForm.authorizeUrl" class="mt-3 rounded-xl border border-sky-200 bg-sky-50/80 p-3 text-xs text-sky-700 dark:border-sky-800/50 dark:bg-sky-900/10 dark:text-sky-300">
+                    <div class="font-medium">Gmail 授权链接</div>
+                    <div class="mt-1 break-all">{{ gmailOauthForm.authorizeUrl }}</div>
+                  </div>
+                </div>
+
+                <label class="space-y-2">
+                  <span class="text-xs text-gray-500 dark:text-dark-400">粘贴完整回调地址</span>
+                  <textarea
+                    v-model="gmailOauthForm.callbackUrl"
+                    class="input min-h-40 font-mono text-xs"
+                    placeholder="例如：http://localhost:8766/callback?code=...&state=..."
+                  ></textarea>
+                </label>
+              </div>
             </div>
             <div class="modal-footer">
-              <button class="btn btn-primary" :disabled="manualOauthForm.running" @click="submitImport">
-                {{ importMode === 'manual' ? '完成添加' : '开始导入' }}
+              <button class="btn btn-primary" :disabled="manualOauthForm.running || gmailOauthForm.running" @click="submitImport">
+                {{ importMode === 'manual' || importMode === 'gmail' ? '完成添加' : '开始导入' }}
               </button>
             </div>
           </div>
@@ -993,6 +1061,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import {
   assignAccountGroup,
+  completeGmailOauth,
   completeManualOauth,
   createGroupDetailed,
   createTag,
@@ -1014,6 +1083,7 @@ import {
   runTokenRefresh,
   saveSettings,
   setAccountTags,
+  startGmailOauth,
   startManualOauth,
   startGraphReauth,
   translateText,
@@ -1074,13 +1144,23 @@ const taskCenterOpen = ref(false)
 const taskSettingsDirty = ref(false)
 const editAccountOpen = ref(false)
 const importDialogOpen = ref(false)
-const importMode = ref<'text' | 'file' | 'manual'>('text')
+const importMode = ref<'text' | 'file' | 'manual' | 'gmail'>('text')
 const importText = ref('')
 const selectedImportFile = ref<File | null>(null)
 const selectedImportFileName = ref('')
 const manualOauthForm = ref({
   email: '',
   password: '',
+  sessionId: '',
+  authorizeUrl: '',
+  callbackUrl: '',
+  clientId: '',
+  redirectUri: '',
+  expiresIn: 0,
+  running: false,
+})
+const gmailOauthForm = ref({
+  email: '',
   sessionId: '',
   authorizeUrl: '',
   callbackUrl: '',
@@ -1218,6 +1298,14 @@ const customTags = computed<TagDefinition[]>(() => dashboard.value?.settings.cus
 const oauthSettingsReady = computed(() => {
   const settings = dashboard.value?.settings
   return Boolean(settings?.oauth_client_id?.trim() && settings?.oauth_redirect_uri?.trim())
+})
+const gmailSettingsReady = computed(() => {
+  const settings = dashboard.value?.settings
+  return Boolean(
+    settings?.gmail_client_id?.trim() &&
+      settings?.gmail_client_secret?.trim() &&
+      settings?.gmail_redirect_uri?.trim(),
+  )
 })
 
 const groupOptions = computed<GroupOption[]>(() => {
@@ -1762,6 +1850,16 @@ function triggerImport() {
     expiresIn: 0,
     running: false,
   }
+  gmailOauthForm.value = {
+    email: '',
+    sessionId: '',
+    authorizeUrl: '',
+    callbackUrl: '',
+    clientId: '',
+    redirectUri: '',
+    expiresIn: 0,
+    running: false,
+  }
 }
 
 function stopGraphReauthPolling() {
@@ -1933,6 +2031,16 @@ async function copyManualAuthorizeUrl() {
   }
 }
 
+async function copyGmailAuthorizeUrl() {
+  if (!gmailOauthForm.value.authorizeUrl) return
+  try {
+    await navigator.clipboard.writeText(gmailOauthForm.value.authorizeUrl)
+    showSuccess('已复制 Gmail 授权链接')
+  } catch {
+    showError('复制 Gmail 授权链接失败')
+  }
+}
+
 async function startManualOauthFlow() {
   if (!oauthSettingsReady.value) {
     showError('请先在系统设置中配置 Client ID 和 Redirect URI')
@@ -1962,6 +2070,35 @@ async function startManualOauthFlow() {
   }
 }
 
+async function startGmailOauthFlow() {
+  if (!gmailSettingsReady.value) {
+    showError('请先在系统设置中配置 Gmail Client ID、Client Secret 和 Redirect URI')
+    return
+  }
+  const email = gmailOauthForm.value.email.trim()
+  if (!email || !email.includes('@')) {
+    showError('请输入正确的 Gmail 邮箱地址')
+    return
+  }
+  gmailOauthForm.value.running = true
+  try {
+    const response = await startGmailOauth(email)
+    gmailOauthForm.value = {
+      ...gmailOauthForm.value,
+      sessionId: response.data.session_id,
+      authorizeUrl: response.data.authorize_url,
+      clientId: response.data.client_id,
+      redirectUri: response.data.redirect_uri,
+      expiresIn: response.data.expires_in,
+    }
+    showSuccess('Gmail 授权链接已生成，请按说明完成授权')
+  } catch (error: any) {
+    showError(error?.response?.data?.detail || '生成 Gmail 授权链接失败')
+  } finally {
+    gmailOauthForm.value.running = false
+  }
+}
+
 async function submitImport() {
   if (importMode.value === 'manual') {
     if (!manualOauthForm.value.sessionId || !manualOauthForm.value.authorizeUrl) {
@@ -1985,6 +2122,31 @@ async function submitImport() {
       showError(error?.response?.data?.detail || '微软授权添加失败')
     } finally {
       manualOauthForm.value.running = false
+    }
+    return
+  }
+  if (importMode.value === 'gmail') {
+    if (!gmailOauthForm.value.sessionId || !gmailOauthForm.value.authorizeUrl) {
+      showError('请先生成 Gmail 授权链接')
+      return
+    }
+    if (!gmailOauthForm.value.callbackUrl.trim()) {
+      showError('请粘贴完整回调地址')
+      return
+    }
+    gmailOauthForm.value.running = true
+    try {
+      const response = await completeGmailOauth(
+        gmailOauthForm.value.sessionId,
+        gmailOauthForm.value.callbackUrl.trim(),
+      )
+      showSuccess(response.message)
+      importDialogOpen.value = false
+      await refreshState(true)
+    } catch (error: any) {
+      showError(error?.response?.data?.detail || 'Gmail 授权添加失败')
+    } finally {
+      gmailOauthForm.value.running = false
     }
     return
   }

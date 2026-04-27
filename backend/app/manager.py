@@ -19,6 +19,7 @@ from .imap_logic import (
     fetch_mail_body,
     fetch_mails_once,
     format_shanghai_time,
+    get_gmail_access_token,
     get_graph_access_token,
     get_oauth_access_token,
     parse_text_to_accounts,
@@ -529,6 +530,7 @@ class MailManager:
         return {
             "index": index,
             "email": account.email,
+            "provider": account.provider,
             "group_name": account.group_name or "未分组",
             "tags": account.tags,
             "note": account.note,
@@ -558,6 +560,11 @@ class MailManager:
             "body_text": item.body_text,
         }
 
+    def public_settings(self) -> dict:
+        payload = settings_to_dict(self.settings)
+        payload["gmail_client_secret"] = "********" if self.settings.gmail_client_secret else ""
+        return payload
+
     def dashboard_state(self) -> dict:
         with self.lock:
             return {
@@ -567,7 +574,7 @@ class MailManager:
                     for idx, account in enumerate(self.accounts, start=1)
                 ],
                 "mails": [self.serialize_mail(item) for item in self.all_mails],
-                "settings": settings_to_dict(self.settings),
+                "settings": self.public_settings(),
             }
 
     def start_receive_batch(self, targets: list[Optional[MailAccount]]) -> int:
@@ -780,9 +787,11 @@ class MailManager:
                 raise ValueError("邮箱不存在")
             return {
                 "email": account.email,
+                "provider": account.provider,
                 "password": account.password,
                 "auth_code_or_client_id": account.auth_code_or_client_id,
                 "token": account.token,
+                "client_secret": "********" if account.client_secret else "",
                 "imap_host": account.imap_host,
                 "imap_port": account.imap_port,
                 "group_name": account.group_name,
@@ -802,11 +811,16 @@ class MailManager:
             if new_email != original_email and self.find_account(new_email):
                 raise ValueError("该邮箱已存在")
             account.email = new_email
+            account.provider = str(payload.get("provider", account.provider) or account.provider)
             account.password = str(payload.get("password", account.password))
             account.auth_code_or_client_id = str(
                 payload.get("auth_code_or_client_id", account.auth_code_or_client_id)
             )
             account.token = str(payload.get("token", account.token))
+            if "client_secret" in payload:
+                next_secret = str(payload.get("client_secret") or "")
+                if next_secret and next_secret != "********":
+                    account.client_secret = next_secret
             account.imap_host = str(payload.get("imap_host", account.imap_host))
             account.imap_port = int(payload.get("imap_port", account.imap_port) or account.imap_port)
             account.group_name = self._normalize_group_name(
@@ -834,6 +848,8 @@ class MailManager:
             account.cached_access_expire_at = 0.0
             account.cached_graph_access_token = ""
             account.cached_graph_access_expire_at = 0.0
+            account.cached_gmail_access_token = ""
+            account.cached_gmail_access_expire_at = 0.0
             self._save_accounts_state()
             self.rebuild_mail_pool()
             self.log_event("info", "account", "update", new_email, "编辑账号", {"original_email": original_email})
@@ -976,6 +992,17 @@ class MailManager:
                 payload.get("oauth_redirect_uri", self.settings.oauth_redirect_uri)
                 or "http://localhost:8765/callback"
             ).strip()
+            self.settings.gmail_client_id = str(
+                payload.get("gmail_client_id", self.settings.gmail_client_id) or ""
+            ).strip()
+            if "gmail_client_secret" in payload:
+                next_secret = str(payload.get("gmail_client_secret") or "").strip()
+                if next_secret and next_secret != "********":
+                    self.settings.gmail_client_secret = next_secret
+            self.settings.gmail_redirect_uri = str(
+                payload.get("gmail_redirect_uri", self.settings.gmail_redirect_uri)
+                or "http://localhost:8766/callback"
+            ).strip()
             self.settings.telegram_enabled = bool(
                 payload.get("telegram_enabled", self.settings.telegram_enabled)
             )
@@ -1049,7 +1076,7 @@ class MailManager:
                 self._persist_scheduler_state()
             self.storage.save_settings(self.settings)
             self.log_event("info", "settings", "update", "app_settings", "更新系统设置")
-            return settings_to_dict(self.settings)
+            return self.public_settings()
 
     def open_mail(self, local_key: str) -> dict:
         with self.lock:
@@ -1101,22 +1128,26 @@ class MailManager:
             success_count = 0
             failed_count = 0
             for account in accounts:
-                imap_token, imap_message = get_oauth_access_token(account)
-                graph_token, graph_message = get_graph_access_token(account)
-                ok = bool(imap_token or graph_token)
+                if account.provider == "gmail":
+                    gmail_token, gmail_message = get_gmail_access_token(account)
+                    imap_message = "-"
+                    graph_message = "-"
+                    ok = bool(gmail_token)
+                    if not ok:
+                        self.log_event("error", "token_refresh", "account_failed", account.email, "Token 刷新失败", {"gmail": gmail_message})
+                    detail = {"gmail": gmail_message}
+                else:
+                    imap_token, imap_message = get_oauth_access_token(account)
+                    graph_token, graph_message = get_graph_access_token(account)
+                    ok = bool(imap_token or graph_token)
+                    if not ok:
+                        self.log_event("error", "token_refresh", "account_failed", account.email, "Token 刷新失败", {"imap": imap_message, "graph": graph_message})
+                    detail = {"imap": imap_message, "graph": graph_message}
                 if ok:
                     success_count += 1
                 else:
                     failed_count += 1
-                    self.log_event("error", "token_refresh", "account_failed", account.email, "Token 刷新失败", {"imap": imap_message, "graph": graph_message})
-                results.append(
-                    {
-                        "email": account.email,
-                        "success": ok,
-                        "imap": imap_message,
-                        "graph": graph_message,
-                    }
-                )
+                results.append({"email": account.email, "success": ok, **detail})
             self._save_accounts_state()
             self.last_token_refresh_run_at = time.time()
             self._persist_scheduler_state()
@@ -1323,6 +1354,8 @@ class MailManager:
                 account.cached_access_expire_at = 0.0
                 account.cached_graph_access_token = ""
                 account.cached_graph_access_expire_at = 0.0
+                account.cached_gmail_access_token = ""
+                account.cached_gmail_access_expire_at = 0.0
                 self.enqueue_login(account)
             self.log_event(
                 "warn",

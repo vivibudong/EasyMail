@@ -30,6 +30,7 @@ from .storage import SqliteStorage
 GRAPH_REAUTH_SCOPE = "offline_access openid profile https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read"
 MANUAL_OAUTH_SCOPE = GRAPH_REAUTH_SCOPE
 MICROSOFT_CONSUMERS_BASE_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0"
+GMAIL_OAUTH_SCOPE = "openid email profile https://www.googleapis.com/auth/gmail.readonly"
 
 storage = SqliteStorage(config.data_dir)
 manager = MailManager(storage)
@@ -61,6 +62,7 @@ class GraphReauthSession:
 
 graph_reauth_sessions: dict[str, GraphReauthSession] = {}
 manual_oauth_sessions: dict[str, dict] = {}
+gmail_oauth_sessions: dict[str, dict] = {}
 
 
 class LoginRequest(BaseModel):
@@ -142,6 +144,15 @@ class ManualOauthCompleteRequest(BaseModel):
     callback_url: str
 
 
+class GmailOauthStartRequest(BaseModel):
+    email: str
+
+
+class GmailOauthCompleteRequest(BaseModel):
+    session_id: str
+    callback_url: str
+
+
 class MailOpenRequest(BaseModel):
     local_key: str
 
@@ -175,6 +186,9 @@ class SettingsRequest(BaseModel):
     backup_keep_count: int = 10
     oauth_client_id: str = ""
     oauth_redirect_uri: str = "http://localhost:8765/callback"
+    gmail_client_id: str = ""
+    gmail_client_secret: str = ""
+    gmail_redirect_uri: str = "http://localhost:8766/callback"
     telegram_enabled: bool = False
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
@@ -252,9 +266,49 @@ def _build_authorize_url(client_id: str, redirect_uri: str, state: str, code_cha
     return f"{MICROSOFT_CONSUMERS_BASE_URL}/authorize?{query}"
 
 
+def _build_gmail_authorize_url(client_id: str, redirect_uri: str, state: str) -> str:
+    query = urllib.parse.urlencode(
+        {
+            "client_id": client_id,
+            "response_type": "code",
+            "redirect_uri": redirect_uri,
+            "scope": GMAIL_OAUTH_SCOPE,
+            "state": state,
+            "access_type": "offline",
+            "prompt": "consent select_account",
+            "include_granted_scopes": "false",
+        }
+    )
+    return f"https://accounts.google.com/o/oauth2/v2/auth?{query}"
+
+
 def _get_graph_profile(access_token: str) -> dict:
     request = urllib.request.Request(
         "https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName,displayName",
+        method="GET",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        raise ValueError(raw) from exc
+    try:
+        payload = json.loads(raw)
+    except Exception as exc:
+        raise ValueError(raw) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(raw)
+    return payload
+
+
+def _get_gmail_profile(access_token: str) -> dict:
+    request = urllib.request.Request(
+        "https://gmail.googleapis.com/gmail/v1/users/me/profile",
         method="GET",
         headers={
             "Authorization": f"Bearer {access_token}",
@@ -844,9 +898,178 @@ def complete_manual_oauth(
     )
 
 
+@app.post("/api/oauth/gmail/start")
+def start_gmail_oauth(
+    payload: GmailOauthStartRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    settings = manager.settings
+    client_id = settings.gmail_client_id.strip()
+    client_secret = settings.gmail_client_secret.strip()
+    redirect_uri = settings.gmail_redirect_uri.strip()
+    if not client_id:
+        raise HTTPException(status_code=400, detail="请先在系统设置中填写 Gmail Client ID")
+    if not client_secret:
+        raise HTTPException(status_code=400, detail="请先在系统设置中填写 Gmail Client Secret")
+    if not redirect_uri:
+        raise HTTPException(status_code=400, detail="请先在系统设置中填写 Gmail Redirect URI")
+    email_addr = payload.email.strip().lower()
+    if "@" not in email_addr:
+        raise HTTPException(status_code=400, detail="邮箱格式无效")
+    state = secrets.token_urlsafe(24)
+    session_id = uuid4().hex
+    authorize_url = _build_gmail_authorize_url(client_id, redirect_uri, state)
+    gmail_oauth_sessions[session_id] = {
+        "session_id": session_id,
+        "email": email_addr,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "state": state,
+        "expires_at": time.time() + 900,
+    }
+    manager.log_event(
+        "info",
+        "oauth_gmail",
+        "start",
+        email_addr,
+        "发起 Gmail 授权",
+        {"client_id": client_id, "redirect_uri": redirect_uri},
+    )
+    return ok(
+        "Gmail 授权链接已生成",
+        {
+            "session_id": session_id,
+            "authorize_url": authorize_url,
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "expires_in": 900,
+            "scope": GMAIL_OAUTH_SCOPE,
+        },
+    )
+
+
+@app.post("/api/oauth/gmail/complete")
+def complete_gmail_oauth(
+    payload: GmailOauthCompleteRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    session = gmail_oauth_sessions.get(payload.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="授权会话不存在或已过期")
+    if time.time() >= float(session["expires_at"]):
+        gmail_oauth_sessions.pop(payload.session_id, None)
+        raise HTTPException(status_code=400, detail="授权会话已过期，请重新生成授权链接")
+
+    callback_url = payload.callback_url.strip()
+    parsed = urllib.parse.urlparse(callback_url)
+    query = urllib.parse.parse_qs(parsed.query)
+    if "error" in query:
+        detail = query.get("error_description", query.get("error", ["授权失败"]))[0]
+        raise HTTPException(status_code=400, detail=f"Gmail 授权失败: {detail}")
+    code = query.get("code", [""])[0].strip()
+    state = query.get("state", [""])[0].strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="回调地址中缺少 code 参数")
+    if state != session["state"]:
+        raise HTTPException(status_code=400, detail="state 校验失败，请重新生成授权链接")
+
+    try:
+        token_data = _post_form_json(
+            "https://oauth2.googleapis.com/token",
+            {
+                "client_id": session["client_id"],
+                "client_secret": session["client_secret"],
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": session["redirect_uri"],
+            },
+        )
+    except ValueError as exc:
+        manager.log_event(
+            "error",
+            "oauth_gmail",
+            "token_exchange_failed",
+            str(session["email"]),
+            "Gmail 授权 token 交换失败",
+            {
+                "client_id": session["client_id"],
+                "redirect_uri": session["redirect_uri"],
+                "code_length": len(code),
+                "error": str(exc),
+            },
+        )
+        raise HTTPException(status_code=400, detail=f"token 交换失败: {exc}") from exc
+
+    refresh_token = str(token_data.get("refresh_token", "") or "")
+    access_token = str(token_data.get("access_token", "") or "")
+    if not refresh_token:
+        raise HTTPException(status_code=400, detail="Google 返回中缺少 refresh_token，请重新生成授权链接并确认使用 consent 授权")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Google 返回中缺少 access_token")
+
+    try:
+        profile = _get_gmail_profile(access_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"获取 Gmail 账号信息失败: {exc}") from exc
+
+    actual_email = str(profile.get("emailAddress") or "").strip().lower()
+    expected_email = str(session["email"]).strip().lower()
+    if not actual_email or "@" not in actual_email:
+        raise HTTPException(status_code=400, detail="Google 未返回可识别的邮箱地址，请重试")
+    if actual_email != expected_email:
+        raise HTTPException(
+            status_code=400,
+            detail=f"授权账号与预填邮箱不一致：当前授权为 {actual_email}，预填为 {expected_email}",
+        )
+
+    with manager.lock:
+        existing = manager.find_account(actual_email)
+        if existing:
+            existing.provider = "gmail"
+            existing.auth_code_or_client_id = str(session["client_id"])
+            existing.client_secret = str(session["client_secret"])
+            existing.token = refresh_token
+            existing.status = "待登录"
+            existing.last_error = ""
+            existing.cached_gmail_access_token = ""
+            existing.cached_gmail_access_expire_at = 0.0
+            target = existing
+        else:
+            target = MailAccount(
+                email=actual_email,
+                provider="gmail",
+                auth_code_or_client_id=str(session["client_id"]),
+                client_secret=str(session["client_secret"]),
+                token=refresh_token,
+                status="待登录",
+            )
+            manager.accounts.append(target)
+        manager._save_accounts_state()
+        manager.rebuild_mail_pool()
+        manager.enqueue_login(target)
+        manager.log_event(
+            "info",
+            "oauth_gmail",
+            "complete",
+            actual_email,
+            "Gmail 授权成功",
+            {"client_id": session["client_id"], "redirect_uri": session["redirect_uri"]},
+        )
+
+    gmail_oauth_sessions.pop(payload.session_id, None)
+    return ok(
+        "Gmail 授权成功，账号已加入列表并开始登录",
+        {
+            "email": actual_email,
+            "client_id": session["client_id"],
+        },
+    )
+
+
 @app.get("/api/settings")
 def get_settings(current_user: dict = Depends(get_current_user)) -> dict:
-    return ok("ok", manager.dashboard_state().get("settings", {}))
+    return ok("ok", manager.public_settings())
 
 
 @app.put("/api/settings")
