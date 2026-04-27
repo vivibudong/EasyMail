@@ -29,11 +29,9 @@ class MailItem:
 @dataclass
 class MailAccount:
     email: str
-    provider: str = "outlook"
     password: str = ""
     auth_code_or_client_id: str = ""
     token: str = ""
-    client_secret: str = ""
     imap_host: str = IMAP_HOST
     imap_port: int = IMAP_PORT
     status: str = "未登录"
@@ -46,8 +44,6 @@ class MailAccount:
     cached_access_expire_at: float = 0.0
     cached_graph_access_token: str = ""
     cached_graph_access_expire_at: float = 0.0
-    cached_gmail_access_token: str = ""
-    cached_gmail_access_expire_at: float = 0.0
     flag_color: str = ""
     group_name: str = "未分组"
     tags: list[str] = field(default_factory=list)
@@ -91,9 +87,6 @@ class AppSettings:
     backup_keep_count: int = 10
     oauth_client_id: str = ""
     oauth_redirect_uri: str = "http://localhost:8765/callback"
-    gmail_client_id: str = ""
-    gmail_client_secret: str = ""
-    gmail_redirect_uri: str = "http://localhost:8766/callback"
     telegram_enabled: bool = False
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
@@ -168,19 +161,15 @@ def mail_item_from_dict(data: dict) -> Optional[MailItem]:
 def account_to_dict(a: MailAccount) -> dict:
     return {
         "email": a.email,
-        "provider": a.provider,
         "password": a.password,
         "auth_code_or_client_id": a.auth_code_or_client_id,
         "token": a.token,
-        "client_secret": a.client_secret,
         "imap_host": a.imap_host,
         "imap_port": a.imap_port,
         "cached_access_token": a.cached_access_token,
         "cached_access_expire_at": a.cached_access_expire_at,
         "cached_graph_access_token": a.cached_graph_access_token,
         "cached_graph_access_expire_at": a.cached_graph_access_expire_at,
-        "cached_gmail_access_token": a.cached_gmail_access_token,
-        "cached_gmail_access_expire_at": a.cached_gmail_access_expire_at,
         "flag_color": a.flag_color,
         "group_name": a.group_name,
         "tags": a.tags,
@@ -198,11 +187,9 @@ def account_from_dict(data: dict) -> Optional[MailAccount]:
         port = IMAP_PORT
     return MailAccount(
         email=email_addr,
-        provider=str(data.get("provider", "outlook") or "outlook"),
         password=str(data.get("password", "")),
         auth_code_or_client_id=str(data.get("auth_code_or_client_id", "")),
         token=str(data.get("token", "")),
-        client_secret=str(data.get("client_secret", "")),
         imap_host=str(data.get("imap_host", IMAP_HOST)),
         imap_port=port,
         status="待登录",
@@ -210,8 +197,6 @@ def account_from_dict(data: dict) -> Optional[MailAccount]:
         cached_access_expire_at=float(data.get("cached_access_expire_at", 0.0) or 0.0),
         cached_graph_access_token=str(data.get("cached_graph_access_token", "")),
         cached_graph_access_expire_at=float(data.get("cached_graph_access_expire_at", 0.0) or 0.0),
-        cached_gmail_access_token=str(data.get("cached_gmail_access_token", "")),
-        cached_gmail_access_expire_at=float(data.get("cached_gmail_access_expire_at", 0.0) or 0.0),
         flag_color=str(data.get("flag_color", "")),
         group_name=str(data.get("group_name", "未分组") or "未分组"),
         tags=[str(item) for item in data.get("tags", []) if str(item).strip()],
@@ -246,9 +231,6 @@ def settings_to_dict(settings: AppSettings) -> dict:
         "backup_keep_count": settings.backup_keep_count,
         "oauth_client_id": settings.oauth_client_id,
         "oauth_redirect_uri": settings.oauth_redirect_uri,
-        "gmail_client_id": settings.gmail_client_id,
-        "gmail_client_secret": settings.gmail_client_secret,
-        "gmail_redirect_uri": settings.gmail_redirect_uri,
         "telegram_enabled": settings.telegram_enabled,
         "telegram_bot_token": settings.telegram_bot_token,
         "telegram_chat_id": settings.telegram_chat_id,
@@ -340,12 +322,6 @@ def settings_from_dict(data: dict) -> AppSettings:
         oauth_redirect_uri=str(
             data.get("oauth_redirect_uri", "http://localhost:8765/callback")
             or "http://localhost:8765/callback"
-        ),
-        gmail_client_id=str(data.get("gmail_client_id", "") or ""),
-        gmail_client_secret=str(data.get("gmail_client_secret", "") or ""),
-        gmail_redirect_uri=str(
-            data.get("gmail_redirect_uri", "http://localhost:8766/callback")
-            or "http://localhost:8766/callback"
         ),
         telegram_enabled=bool(data.get("telegram_enabled", False)),
         telegram_bot_token=str(data.get("telegram_bot_token", "") or ""),

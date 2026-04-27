@@ -43,7 +43,6 @@ export interface Overview {
 export interface MailAccountSummary {
   index: number
   email: string
-  provider: string
   group_name: string
   tags: string[]
   note: string
@@ -109,9 +108,6 @@ export interface AppSettings {
   backup_keep_count: number
   oauth_client_id: string
   oauth_redirect_uri: string
-  gmail_client_id: string
-  gmail_client_secret: string
-  gmail_redirect_uri: string
   telegram_enabled: boolean
   telegram_bot_token: string
   telegram_chat_id: string

@@ -110,47 +110,6 @@
           </div>
         </section>
 
-        <section v-else-if="currentSection === 'gmail'" class="card">
-          <div class="card-header">
-            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Gmail 授权配置</h2>
-            <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
-              用于 Gmail API 只读收件授权。Client Secret 会加密传输保存，前台只显示已配置状态。
-            </p>
-          </div>
-
-          <div class="card-body grid gap-4 md:grid-cols-2">
-            <label class="space-y-2 md:col-span-2">
-              <span class="input-label mb-0">Client ID</span>
-              <input v-model="form.gmail_client_id" class="input" type="text" placeholder="xxxx.apps.googleusercontent.com" />
-            </label>
-            <label class="space-y-2">
-              <span class="input-label mb-0">Client Secret</span>
-              <input
-                v-model="gmailClientSecretInput"
-                class="input"
-                type="password"
-                autocomplete="new-password"
-                placeholder="GOCSPX-..."
-              />
-              <span class="text-xs text-gray-500 dark:text-dark-400">
-                {{ form.gmail_client_secret ? '已配置。留空或保持占位不会覆盖原值。' : '尚未配置。' }}
-              </span>
-            </label>
-            <label class="space-y-2">
-              <span class="input-label mb-0">Redirect URI</span>
-              <input v-model="form.gmail_redirect_uri" class="input" type="text" placeholder="例如：http://localhost:8766/callback" />
-            </label>
-          </div>
-
-          <div class="card-footer">
-            <div class="space-y-2 text-xs leading-6 text-gray-500 dark:text-dark-400">
-              <p>需要在 Google Cloud 启用 Gmail API，并将 Redirect URI 配置到 OAuth Client 的 Authorized redirect URIs。</p>
-              <p>推荐权限范围为 `openid email profile https://www.googleapis.com/auth/gmail.readonly`，只读收件，不修改 Gmail 官方已读状态。</p>
-              <p>授权完成后如果 localhost 页面打不开是正常现象，复制地址栏完整回调地址回到导入窗口即可。</p>
-            </div>
-          </div>
-        </section>
-
         <section v-else-if="currentSection === 'notifications'" class="card">
           <div class="card-header">
             <h2 class="text-lg font-semibold text-gray-900 dark:text-white">通知配置</h2>
@@ -365,7 +324,6 @@ const sections = [
   { key: 'import', label: '导入规则' },
   { key: 'reading', label: '阅读偏好' },
   { key: 'oauth', label: '微软授权' },
-  { key: 'gmail', label: 'Gmail 授权' },
   { key: 'notifications', label: '通知' },
   { key: 'refresh', label: '邮箱刷新' },
   { key: 'backup', label: '备份' },
@@ -391,9 +349,6 @@ const form = reactive<AppSettings>({
   backup_keep_count: 10,
   oauth_client_id: '',
   oauth_redirect_uri: 'http://localhost:8765/callback',
-  gmail_client_id: '',
-  gmail_client_secret: '',
-  gmail_redirect_uri: 'http://localhost:8766/callback',
   telegram_enabled: false,
   telegram_bot_token: '',
   telegram_chat_id: '',
@@ -408,7 +363,6 @@ const testingNotification = ref(false)
 const runningTokenRefresh = ref(false)
 const runningBackup = ref(false)
 const newDelimiter = ref('')
-const gmailClientSecretInput = ref('')
 const toastStore = useToastStore()
 const restoreBackupInput = ref<HTMLInputElement | null>(null)
 const tokenRefreshHistory = ref<
@@ -430,7 +384,6 @@ const groupOptions = computed(() => ['未分组', ...form.custom_groups.map((ite
 onMounted(async () => {
   const response = await getSettings()
   Object.assign(form, response.data)
-  gmailClientSecretInput.value = form.gmail_client_secret ? '********' : ''
   await loadTokenRefreshHistory()
 })
 
@@ -466,13 +419,8 @@ function removeDelimiter(index: number) {
 async function handleSave() {
   saving.value = true
   try {
-    const payload = {
-      ...form,
-      gmail_client_secret: gmailClientSecretInput.value === '********' ? '' : gmailClientSecretInput.value,
-    }
-    const response = await saveSettings(payload)
+    const response = await saveSettings(form)
     Object.assign(form, response.data)
-    gmailClientSecretInput.value = form.gmail_client_secret ? '********' : ''
     toastStore.push(response.message, 'success')
   } catch (error: any) {
     toastStore.push(error?.response?.data?.detail || '设置保存失败', 'error')
@@ -484,13 +432,8 @@ async function handleSave() {
 async function handleTestNotification() {
   testingNotification.value = true
   try {
-    const payload = {
-      ...form,
-      gmail_client_secret: gmailClientSecretInput.value === '********' ? '' : gmailClientSecretInput.value,
-    }
-    const saveResponse = await saveSettings(payload)
+    const saveResponse = await saveSettings(form)
     Object.assign(form, saveResponse.data)
-    gmailClientSecretInput.value = form.gmail_client_secret ? '********' : ''
     const response = await sendTestNotification()
     toastStore.push(response.message, 'success')
   } catch (error: any) {

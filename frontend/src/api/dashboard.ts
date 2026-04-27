@@ -111,11 +111,9 @@ export async function getAccountDetail(email: string) {
     ApiResponse<{
       account: {
         email: string
-        provider: string
         password: string
         auth_code_or_client_id: string
         token: string
-        client_secret: string
         imap_host: string
         imap_port: number
         group_name: string
@@ -133,11 +131,9 @@ export async function getAccountDetail(email: string) {
 export async function updateAccount(payload: {
   original_email: string
   email: string
-  provider?: string
   password: string
   auth_code_or_client_id: string
   token: string
-  client_secret?: string
   imap_host: string
   imap_port: number
   group_name: string
@@ -192,33 +188,6 @@ export async function completeManualOauth(sessionId: string, callbackUrl: string
       has_password: boolean
     }>
   >('/oauth/manual/complete', {
-    session_id: sessionId,
-    callback_url: callbackUrl,
-  })
-  return data
-}
-
-export async function startGmailOauth(email: string) {
-  const { data } = await apiClient.post<
-    ApiResponse<{
-      session_id: string
-      authorize_url: string
-      client_id: string
-      redirect_uri: string
-      expires_in: number
-      scope: string
-    }>
-  >('/oauth/gmail/start', { email })
-  return data
-}
-
-export async function completeGmailOauth(sessionId: string, callbackUrl: string) {
-  const { data } = await apiClient.post<
-    ApiResponse<{
-      email: string
-      client_id: string
-    }>
-  >('/oauth/gmail/complete', {
     session_id: sessionId,
     callback_url: callbackUrl,
   })

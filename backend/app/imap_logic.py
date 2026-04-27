@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import datetime as dt
 import email
-import base64
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
 import html
@@ -21,8 +20,6 @@ from .models import DEFAULT_IMPORT_DELIMITERS, MailAccount, MailItem
 OAUTH_SCOPE = "https://outlook.office.com/IMAP.AccessAsUser.All offline_access"
 GRAPH_SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access"
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
-GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
-GMAIL_BASE_URL = "https://gmail.googleapis.com/gmail/v1"
 EMAIL_PATTERN = re.compile(r"^[^\s@<>'\",;|]+@[^\s@<>'\",;|]+\.[^\s@<>'\",;|]+$")
 
 
@@ -340,181 +337,6 @@ def _html_to_text(raw_html: str) -> str:
     return text.strip()
 
 
-def get_gmail_access_token(account: MailAccount) -> tuple[Optional[str], str]:
-    now = time.time()
-    if account.cached_gmail_access_token and now < account.cached_gmail_access_expire_at - 60:
-        return account.cached_gmail_access_token, "Gmail刷新令牌(缓存)"
-    if not account.token.strip():
-        return None, "缺少 Gmail refresh_token"
-    if not account.auth_code_or_client_id.strip():
-        return None, "缺少 Gmail Client ID"
-    if not account.client_secret.strip():
-        return None, "缺少 Gmail Client Secret"
-    body = urlencode(
-        {
-            "client_id": account.auth_code_or_client_id.strip(),
-            "client_secret": account.client_secret.strip(),
-            "grant_type": "refresh_token",
-            "refresh_token": account.token.strip(),
-        }
-    ).encode("utf-8")
-    request = Request("https://oauth2.googleapis.com/token", data=body, method="POST")
-    request.add_header("Content-Type", "application/x-www-form-urlencoded")
-    try:
-        with urlopen(request, timeout=20) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-        data = json.loads(raw)
-        access_token = str(data.get("access_token", "") or "")
-        expires_in = int(data.get("expires_in", 3600) or 3600)
-        if not access_token:
-            return None, f"Gmail token接口无access_token: {raw[:220]}"
-        account.cached_gmail_access_token = access_token
-        account.cached_gmail_access_expire_at = now + max(300, expires_in)
-        return access_token, "Gmail刷新令牌"
-    except Exception as exc:
-        return None, str(exc)
-
-
-def _gmail_request_json(path: str, access_token: str, timeout: int = 20) -> tuple[Optional[dict], str]:
-    request = Request(f"{GMAIL_BASE_URL}{path}", method="GET")
-    request.add_header("Authorization", f"Bearer {access_token}")
-    request.add_header("Accept", "application/json")
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-        payload = json.loads(raw)
-        return payload if isinstance(payload, dict) else {}, "OK"
-    except Exception as exc:
-        return None, str(exc)
-
-
-def _gmail_decode_body(data: str) -> str:
-    if not data:
-        return ""
-    padded = data + "=" * (-len(data) % 4)
-    raw = base64.urlsafe_b64decode(padded.encode("utf-8"))
-    return raw.decode("utf-8", errors="replace").strip()
-
-
-def _gmail_extract_body(payload: dict) -> str:
-    mime_type = str(payload.get("mimeType", "") or "").lower()
-    body_data = ""
-    body_payload = payload.get("body", {})
-    if isinstance(body_payload, dict):
-        body_data = str(body_payload.get("data", "") or "")
-    if body_data and mime_type == "text/plain":
-        return _gmail_decode_body(body_data)
-    parts = payload.get("parts", [])
-    if isinstance(parts, list):
-        for part in parts:
-            if isinstance(part, dict) and str(part.get("mimeType", "") or "").lower() == "text/plain":
-                text = _gmail_extract_body(part)
-                if text:
-                    return text
-        for part in parts:
-            if isinstance(part, dict):
-                text = _gmail_extract_body(part)
-                if text:
-                    return text
-    if body_data and mime_type == "text/html":
-        return _html_to_text(_gmail_decode_body(body_data))
-    return _html_to_text(_gmail_decode_body(body_data)) if body_data else ""
-
-
-def _gmail_header(headers: list, name: str) -> str:
-    for item in headers:
-        if isinstance(item, dict) and str(item.get("name", "")).lower() == name.lower():
-            return str(item.get("value", "") or "")
-    return ""
-
-
-def fetch_mails_via_gmail(
-    account: MailAccount,
-    local_read_keys: Optional[set[str]],
-    existing_mails: Optional[list[MailItem]],
-) -> tuple[int, list[MailItem], str]:
-    access_token, message = get_gmail_access_token(account)
-    if not access_token:
-        return 0, existing_mails or [], message
-    existing_by_key: dict[str, MailItem] = {}
-    if existing_mails:
-        existing_by_key = {item.local_key: item for item in existing_mails if item.source == "gmail"}
-    unseen_total = 0
-    successful_requests = 0
-    for label_id, folder_name in [("INBOX", "收件箱"), ("SPAM", "垃圾邮件")]:
-        payload, error = _gmail_request_json(
-            f"/users/me/messages?maxResults=50&labelIds={label_id}",
-            access_token,
-        )
-        if payload is None:
-            continue
-        successful_requests += 1
-        messages = payload.get("messages", [])
-        if not isinstance(messages, list):
-            messages = []
-        for entry in messages:
-            if not isinstance(entry, dict):
-                continue
-            remote_id = str(entry.get("id", "") or "").strip()
-            if not remote_id:
-                continue
-            local_key = f"{account.email}|gmail|{remote_id}"
-            detail, detail_error = _gmail_request_json(
-                f"/users/me/messages/{quote(remote_id)}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date",
-                access_token,
-            )
-            if detail is None:
-                continue
-            label_ids = detail.get("labelIds", [])
-            if not isinstance(label_ids, list):
-                label_ids = []
-            is_unread = "UNREAD" in label_ids
-            if local_read_keys and local_key in local_read_keys:
-                is_unread = False
-            if is_unread:
-                unseen_total += 1
-            headers = []
-            payload_part = detail.get("payload", {})
-            if isinstance(payload_part, dict):
-                raw_headers = payload_part.get("headers", [])
-                if isinstance(raw_headers, list):
-                    headers = raw_headers
-            raw_from = _gmail_header(headers, "From")
-            display_name, sender_address = email.utils.parseaddr(raw_from)
-            internal_date = str(detail.get("internalDate", "") or "")
-            date_value = dt.datetime(1970, 1, 1)
-            if internal_date.isdigit():
-                date_value = dt.datetime.fromtimestamp(int(internal_date) / 1000, tz=ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
-            else:
-                date_value = parse_email_date(_gmail_header(headers, "Date"))
-            if local_key in existing_by_key:
-                existing_item = existing_by_key[local_key]
-                existing_item.folder = folder_name
-                existing_item.date_value = date_value
-                existing_item.date_text = format_shanghai_time(date_value)
-                existing_item.is_unread = is_unread
-                continue
-            existing_by_key[local_key] = MailItem(
-                account_email=account.email,
-                msg_id=remote_id.encode(),
-                folder=folder_name,
-                local_key=local_key,
-                subject=decode_text(_gmail_header(headers, "Subject")) or "(无主题)",
-                from_text=format_sender_display(decode_text(display_name), sender_address),
-                date_text=format_shanghai_time(date_value),
-                date_value=date_value,
-                source="gmail",
-                is_unread=is_unread,
-                body_text="",
-            )
-    if successful_requests == 0:
-        return 0, existing_mails or [], "Gmail API 未获取到可用邮件"
-    merged = list(existing_by_key.values())
-    merged.sort(key=lambda item: item.date_value, reverse=True)
-    account.auth_method = "Gmail API"
-    return unseen_total, merged, "Gmail收信成功"
-
-
 def _graph_folder_candidates() -> list[tuple[str, str]]:
     return [
         ("inbox", "收件箱"),
@@ -654,16 +476,6 @@ def connect_imap(account: MailAccount) -> tuple[Optional[imaplib.IMAP4_SSL], Opt
 
 
 def probe_account_login(account: MailAccount) -> tuple[bool, str, str]:
-    if account.provider == "gmail":
-        access_token, message = get_gmail_access_token(account)
-        if not access_token:
-            return False, "", message
-        payload, error = _gmail_request_json("/users/me/profile", access_token)
-        if payload is not None and str(payload.get("emailAddress") or "").strip():
-            account.auth_method = "Gmail API"
-            return True, "Gmail API", ""
-        return False, "", error
-
     graph_errors: list[str] = []
     if _is_outlook_graph_candidate(account):
         access_token, message = get_graph_access_token(account)
@@ -695,8 +507,6 @@ def fetch_mails_once(
     local_read_keys: Optional[set[str]],
     existing_mails: Optional[list[MailItem]],
 ) -> tuple[int, list[MailItem], str]:
-    if account.provider == "gmail":
-        return fetch_mails_via_gmail(account, local_read_keys, existing_mails)
     if _is_outlook_graph_candidate(account):
         graph_unseen, graph_mails, graph_message = fetch_mails_via_graph(
             account,
@@ -823,20 +633,6 @@ def fetch_mail_body(
     source: str = "imap",
     progress_callback: Optional[Callable[[int, int, float], None]] = None,
 ) -> tuple[str, str, int, float]:
-    if source == "gmail":
-        access_token, error = get_gmail_access_token(account)
-        if not access_token:
-            return "", error, 0, 0.0
-        remote_id = msg_id.decode(errors="ignore")
-        payload, request_error = _gmail_request_json(
-            f"/users/me/messages/{quote(remote_id)}?format=full",
-            access_token,
-        )
-        if payload is None:
-            return "", request_error, 0, 0.0
-        body = _gmail_extract_body(payload.get("payload", {}) if isinstance(payload.get("payload"), dict) else {})
-        return body, "OK", len(body.encode("utf-8", errors="ignore")), 0.01
-
     if source == "graph":
         access_token, error = get_graph_access_token(account)
         if not access_token:
