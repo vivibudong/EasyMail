@@ -65,9 +65,12 @@ services:
 ```bash
 docker compose up -d && docker logs -f $(docker ps -lq)
 ```
+
+启动后会显示一次默认账户与密码，请及时修改。
+
 启动后访问：
 
-- `http://127.0.0.1:3000`
+- `http://IP:3000`
 
 首次使用请修改：
 
