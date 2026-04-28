@@ -34,6 +34,11 @@ MICROSOFT_CONSUMERS_BASE_URL = "https://login.microsoftonline.com/consumers/oaut
 storage = SqliteStorage(config.data_dir)
 manager = MailManager(storage)
 
+if config.generated_credentials:
+    print("EasyMail initial admin credentials", flush=True)
+    print(f"ADMIN_EMAIL={config.generated_credentials['admin_email']}", flush=True)
+    print(f"ADMIN_PASSWORD={config.generated_credentials['admin_password']}", flush=True)
+
 app = FastAPI(title=config.app_name, description=config.app_description)
 app.add_middleware(
     CORSMiddleware,
@@ -389,7 +394,7 @@ def app_config() -> dict:
 
 @app.post("/api/auth/login")
 def login(payload: LoginRequest) -> dict:
-    if payload.email != config.admin_email or payload.password != config.admin_password:
+    if payload.email != config.admin_email or not config.verify_admin_password(payload.password):
         manager.log_event("warn", "auth", "login_denied", payload.email, "后台登录失败")
         raise HTTPException(status_code=401, detail="邮箱或密码错误")
     token = create_access_token(payload.email)
