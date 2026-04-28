@@ -70,7 +70,15 @@ def _load_or_create_runtime_config(data_dir: Path) -> tuple[dict[str, Any], dict
     return payload, {"admin_email": generated_admin_email, "admin_password": generated_password}
 
 
-@dataclass(frozen=True)
+def _write_runtime_config(data_dir: Path, payload: dict[str, Any]) -> None:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    config_path = data_dir / "runtime_config.json"
+    tmp_path = config_path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(config_path)
+
+
+@dataclass
 class AppConfig:
     app_name: str
     app_subtitle: str
@@ -118,3 +126,19 @@ def _build_config() -> AppConfig:
 
 
 config = _build_config()
+
+
+def update_admin_credentials(admin_email: str, admin_password: str) -> None:
+    runtime_config, _ = _load_or_create_runtime_config(config.data_dir)
+    runtime_config["admin_email"] = admin_email
+    runtime_config["admin_password_hash"] = _hash_password(admin_password)
+    runtime_config["jwt_secret"] = runtime_config.get("jwt_secret") or config.jwt_secret
+    runtime_config["token_expire_hours"] = int(
+        runtime_config.get("token_expire_hours", config.token_expire_hours) or config.token_expire_hours
+    )
+    _write_runtime_config(config.data_dir, runtime_config)
+
+    config.admin_email = admin_email
+    config.admin_password_hash = str(runtime_config["admin_password_hash"])
+    config.jwt_secret = str(runtime_config["jwt_secret"])
+    config.token_expire_hours = int(runtime_config["token_expire_hours"])

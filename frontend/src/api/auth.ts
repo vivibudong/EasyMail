@@ -18,3 +18,12 @@ export async function fetchMe() {
   const { data } = await apiClient.get<ApiResponse<{ user: AuthUser }>>('/auth/me')
   return data
 }
+
+export async function updateAdminCredentials(payload: {
+  email: string
+  current_password: string
+  new_password: string
+}) {
+  const { data } = await apiClient.put<ApiResponse<LoginResult>>('/auth/admin-credentials', payload)
+  return data
+}

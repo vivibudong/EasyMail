@@ -239,7 +239,7 @@
           </div>
         </section>
 
-        <section v-else class="card">
+        <section v-else-if="currentSection === 'backup'" class="card">
           <div class="card-header">
             <h2 class="text-lg font-semibold text-gray-900 dark:text-white">备份</h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
@@ -287,6 +287,61 @@
           </div>
         </section>
 
+        <section v-else class="card">
+          <div class="card-header">
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">安全</h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
+              修改后台管理员账号与登录密码。保存后当前会话会自动切换到新账号。
+            </p>
+          </div>
+
+          <div class="card-body grid gap-5 md:grid-cols-2">
+            <label class="space-y-2 md:col-span-2">
+              <span class="input-label mb-0">管理员账号</span>
+              <input v-model.trim="securityForm.email" class="input" type="email" autocomplete="username" />
+            </label>
+            <label class="space-y-2">
+              <span class="input-label mb-0">当前密码</span>
+              <input
+                v-model="securityForm.currentPassword"
+                class="input"
+                type="password"
+                autocomplete="current-password"
+                placeholder="请输入当前登录密码"
+              />
+            </label>
+            <label class="space-y-2">
+              <span class="input-label mb-0">新密码</span>
+              <input
+                v-model="securityForm.newPassword"
+                class="input"
+                type="password"
+                autocomplete="new-password"
+                placeholder="大于 12 位，包含大小写和数字"
+              />
+            </label>
+            <label class="space-y-2">
+              <span class="input-label mb-0">确认新密码</span>
+              <input
+                v-model="securityForm.confirmPassword"
+                class="input"
+                type="password"
+                autocomplete="new-password"
+                placeholder="再次输入新密码"
+              />
+            </label>
+          </div>
+
+          <div class="card-footer flex flex-wrap items-center gap-3">
+            <button class="btn btn-primary" :disabled="savingSecurity" @click="handleSaveSecurity">
+              {{ savingSecurity ? '保存中...' : '保存安全设置' }}
+            </button>
+            <div class="text-xs text-gray-500 dark:text-dark-400">
+              密码必须大于 12 位，并同时包含大写字母、小写字母和数字。
+            </div>
+          </div>
+        </section>
+
         <section class="card p-6">
           <div class="flex flex-wrap items-center gap-3">
             <button class="btn btn-primary" :disabled="saving" @click="handleSave">
@@ -305,6 +360,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { updateAdminCredentials } from '@/api/auth'
 import {
   getSettings,
   getTokenRefreshHistory,
@@ -315,6 +371,7 @@ import {
   sendTestNotification,
 } from '@/api/dashboard'
 import AppLayout from '@/components/layout/AppLayout.vue'
+import { useAuthStore } from '@/stores/auth'
 import { useToastStore } from '@/stores/toast'
 import type { AppSettings } from '@/types'
 
@@ -327,6 +384,7 @@ const sections = [
   { key: 'notifications', label: '通知' },
   { key: 'refresh', label: '邮箱刷新' },
   { key: 'backup', label: '备份' },
+  { key: 'security', label: '安全' },
 ]
 
 const form = reactive<AppSettings>({
@@ -359,11 +417,13 @@ const form = reactive<AppSettings>({
 })
 
 const saving = ref(false)
+const savingSecurity = ref(false)
 const testingNotification = ref(false)
 const runningTokenRefresh = ref(false)
 const runningBackup = ref(false)
 const newDelimiter = ref('')
 const toastStore = useToastStore()
+const authStore = useAuthStore()
 const restoreBackupInput = ref<HTMLInputElement | null>(null)
 const tokenRefreshHistory = ref<
   Array<{
@@ -381,9 +441,17 @@ const currentSection = computed(() => {
 
 const groupOptions = computed(() => ['未分组', ...form.custom_groups.map((item) => item.name).filter((name) => name)])
 
+const securityForm = reactive({
+  email: '',
+  currentPassword: '',
+  newPassword: '',
+  confirmPassword: '',
+})
+
 onMounted(async () => {
   const response = await getSettings()
   Object.assign(form, response.data)
+  securityForm.email = authStore.user?.email || ''
   await loadTokenRefreshHistory()
 })
 
@@ -426,6 +494,62 @@ async function handleSave() {
     toastStore.push(error?.response?.data?.detail || '设置保存失败', 'error')
   } finally {
     saving.value = false
+  }
+}
+
+function validateSecurityForm() {
+  const email = securityForm.email.trim().toLowerCase()
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    toastStore.push('管理员账号必须为邮箱格式', 'error')
+    return null
+  }
+  if (!securityForm.currentPassword) {
+    toastStore.push('请输入当前密码', 'error')
+    return null
+  }
+  if (securityForm.newPassword.length <= 12) {
+    toastStore.push('新密码长度必须大于 12 位', 'error')
+    return null
+  }
+  if (!/[a-z]/.test(securityForm.newPassword)) {
+    toastStore.push('新密码必须包含小写字母', 'error')
+    return null
+  }
+  if (!/[A-Z]/.test(securityForm.newPassword)) {
+    toastStore.push('新密码必须包含大写字母', 'error')
+    return null
+  }
+  if (!/\d/.test(securityForm.newPassword)) {
+    toastStore.push('新密码必须包含数字', 'error')
+    return null
+  }
+  if (securityForm.newPassword !== securityForm.confirmPassword) {
+    toastStore.push('两次输入的新密码不一致', 'error')
+    return null
+  }
+  return email
+}
+
+async function handleSaveSecurity() {
+  const email = validateSecurityForm()
+  if (!email) return
+  savingSecurity.value = true
+  try {
+    const response = await updateAdminCredentials({
+      email,
+      current_password: securityForm.currentPassword,
+      new_password: securityForm.newPassword,
+    })
+    authStore.setSession(response.data.token, response.data.user)
+    securityForm.email = response.data.user.email
+    securityForm.currentPassword = ''
+    securityForm.newPassword = ''
+    securityForm.confirmPassword = ''
+    toastStore.push(response.message, 'success')
+  } catch (error: any) {
+    toastStore.push(error?.response?.data?.detail || '安全设置保存失败', 'error')
+  } finally {
+    savingSecurity.value = false
   }
 }
 

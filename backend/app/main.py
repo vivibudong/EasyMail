@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .auth import create_access_token, get_current_user
-from .config import config
+from .config import config, update_admin_credentials
 from .manager import MailManager
 from .models import DEFAULT_IMPORT_DELIMITERS, MailAccount
 from .storage import SqliteStorage
@@ -71,6 +71,12 @@ manual_oauth_sessions: dict[str, dict] = {}
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+class AdminCredentialsRequest(BaseModel):
+    email: str
+    current_password: str
+    new_password: str
 
 
 class AccountBatchRequest(BaseModel):
@@ -191,6 +197,24 @@ class SettingsRequest(BaseModel):
 
 def ok(message: str, data: Optional[dict] = None) -> dict:
     return {"success": True, "message": message, "data": data or {}}
+
+
+def _validate_admin_email(email: str) -> str:
+    value = email.strip().lower()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+        raise HTTPException(status_code=422, detail="管理员账号必须为邮箱格式")
+    return value
+
+
+def _validate_admin_password(password: str) -> None:
+    if len(password) <= 12:
+        raise HTTPException(status_code=422, detail="密码长度必须大于 12 位")
+    if not re.search(r"[a-z]", password):
+        raise HTTPException(status_code=422, detail="密码必须包含小写字母")
+    if not re.search(r"[A-Z]", password):
+        raise HTTPException(status_code=422, detail="密码必须包含大写字母")
+    if not re.search(r"\d", password):
+        raise HTTPException(status_code=422, detail="密码必须包含数字")
 
 
 def _post_form_json(url: str, payload: dict[str, str]) -> dict:
@@ -411,6 +435,37 @@ def login(payload: LoginRequest) -> dict:
 @app.get("/api/auth/me")
 def me(current_user: dict = Depends(get_current_user)) -> dict:
     return ok("ok", {"user": current_user})
+
+
+@app.put("/api/auth/admin-credentials")
+def update_admin_login(
+    payload: AdminCredentialsRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    admin_email = _validate_admin_email(payload.email)
+    _validate_admin_password(payload.new_password)
+    if not config.verify_admin_password(payload.current_password):
+        manager.log_event("warn", "auth", "admin_credentials_denied", current_user["email"], "安全设置修改失败")
+        raise HTTPException(status_code=401, detail="当前密码错误")
+
+    previous_email = config.admin_email
+    update_admin_credentials(admin_email, payload.new_password)
+    token = create_access_token(admin_email)
+    manager.log_event(
+        "info",
+        "auth",
+        "admin_credentials_updated",
+        admin_email,
+        "安全设置已更新",
+        {"previous_email": previous_email, "new_email": admin_email},
+    )
+    return ok(
+        "安全设置已更新",
+        {
+            "token": token,
+            "user": {"email": admin_email, "role": "admin"},
+        },
+    )
 
 
 @app.get("/api/dashboard/state")
