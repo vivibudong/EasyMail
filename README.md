@@ -72,29 +72,6 @@ docker compose up -d && docker logs -f $(docker ps -lq)
 
 - `http://IP:3000`
 
-首次使用请修改：
-
-- `ADMIN_EMAIL`
-- `ADMIN_PASSWORD`
-- `JWT_SECRET`
-
-### 2. 本地开发
-
-```bash
-git clone https://github.com/vivibudong/EasyMail.git
-cd EasyMail
-cp .env.example .env
-docker build -t easymail:local .
-```
-
-## 项目结构
-
-```text
-backend/   FastAPI 后端
-frontend/  Vue 前端
-data/      运行时数据目录
-img/       演示图
-```
 ### License
 
 his project is licensed under the [MIT License](LICENSE), allowing free use, modification, and distribution with proper attribution.
