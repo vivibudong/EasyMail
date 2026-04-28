@@ -72,11 +72,11 @@ docker compose up -d && docker logs -f $(docker ps -lq)
 
 - `http://IP:3000`
 
-### License
+## License
 
 his project is licensed under the [MIT License](LICENSE), allowing free use, modification, and distribution with proper attribution.
 
-### Contact
+## Contact
 
 For issues or suggestions, open an issue on GitHub or reach out via email: budongkejivivi@gmail.com
 
