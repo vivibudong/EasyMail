@@ -143,13 +143,24 @@
               </select>
             </label>
 
-            <label class="space-y-2">
+            <div class="space-y-2 md:col-span-2">
               <span class="input-label mb-0">监听分组</span>
-              <select v-model="form.telegram_mail_group" class="input">
-                <option value="__all__">全部邮箱</option>
-                <option v-for="group in groupOptions" :key="group" :value="group">{{ group }}</option>
-              </select>
-            </label>
+              <div class="rounded-xl border border-gray-200 p-3 dark:border-dark-700">
+                <div class="flex flex-wrap gap-2">
+                  <label
+                    v-for="group in notificationGroupOptions"
+                    :key="group.value"
+                    class="inline-flex items-center gap-2 rounded-full border border-gray-200 px-3 py-1.5 text-xs text-gray-700 dark:border-dark-700 dark:text-dark-200"
+                  >
+                    <input v-model="form.telegram_mail_groups" :value="group.value" type="checkbox" />
+                    {{ group.label }}
+                  </label>
+                </div>
+                <p class="mt-2 text-xs text-gray-500 dark:text-dark-400">
+                  只监听勾选分组中的邮箱；不勾选任何分组时，不发送新邮件通知。
+                </p>
+              </div>
+            </div>
 
             <label class="space-y-2">
               <span class="input-label mb-0">汇总周期（分钟）</span>
@@ -412,6 +423,7 @@ const form = reactive<AppSettings>({
   telegram_chat_id: '',
   telegram_mail_mode: 'hourly',
   telegram_mail_group: '__all__',
+  telegram_mail_groups: [],
   telegram_mail_summary_minutes: 60,
   telegram_notify_backup: false,
 })
@@ -440,6 +452,10 @@ const currentSection = computed(() => {
 })
 
 const groupOptions = computed(() => ['未分组', ...form.custom_groups.map((item) => item.name).filter((name) => name)])
+const notificationGroupOptions = computed(() => [
+  { value: '__all__', label: '全部邮箱' },
+  ...groupOptions.value.map((group) => ({ value: group, label: group })),
+])
 
 const securityForm = reactive({
   email: '',

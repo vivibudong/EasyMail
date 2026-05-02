@@ -191,6 +191,7 @@ class SettingsRequest(BaseModel):
     telegram_chat_id: str = ""
     telegram_mail_mode: str = "hourly"
     telegram_mail_group: str = "__all__"
+    telegram_mail_groups: list[str] = Field(default_factory=list)
     telegram_mail_summary_minutes: int = 60
     telegram_notify_backup: bool = False
 

@@ -35,6 +35,7 @@ from .models import (
     account_from_dict,
     account_to_dict,
     normalize_import_delimiters,
+    normalize_telegram_mail_groups,
     settings_from_dict,
     settings_to_dict,
 )
@@ -216,8 +217,27 @@ class MailManager:
         self.log_event("info", "notification", "telegram_test", "telegram", "发送 Telegram 测试通知")
 
     def _should_notify_account(self, account: MailAccount) -> bool:
-        target_group = self.settings.telegram_mail_group.strip() or "__all__"
-        return target_group == "__all__" or (account.group_name or "未分组") == target_group
+        target_groups = normalize_telegram_mail_groups(self.settings.telegram_mail_groups)
+        if not target_groups:
+            return False
+        account_group = account.group_name or "未分组"
+        return "__all__" in target_groups or account_group in target_groups
+
+    def _telegram_group_label(self) -> str:
+        target_groups = normalize_telegram_mail_groups(self.settings.telegram_mail_groups)
+        if not target_groups:
+            return "未选择"
+        if "__all__" in target_groups:
+            return "全部邮箱"
+        return "、".join(target_groups)
+
+    def _extract_sender_email(self, from_text: str) -> str:
+        text = from_text.strip()
+        match = re.search(r"<([^<>\s@]+@[^<>\s@]+)>", text)
+        if match:
+            return match.group(1)
+        match = re.search(r"[\w.!#$%&'*+/=?^_`{|}~-]+@[\w.-]+\.[A-Za-z]{2,}", text)
+        return match.group(0) if match else "-"
 
     def _notify_new_mail_instant(self, account: MailAccount, item: MailItem) -> None:
         text = (
@@ -226,7 +246,8 @@ class MailManager:
             "📬 收到一封新邮件\n"
             f"📁 分组：{account.group_name or '未分组'}\n"
             f"📮 邮箱：{account.email}\n"
-            f"📝 主题：{item.subject}"
+            f"📝 主题：{item.subject}\n"
+            f"📨 发件人：{self._extract_sender_email(item.from_text)}"
         )
         self._send_telegram_message(text)
 
@@ -261,6 +282,7 @@ class MailManager:
                     "group_name": account.group_name or "未分组",
                     "email": account.email,
                     "subject": item.subject,
+                    "sender_email": self._extract_sender_email(item.from_text),
                     "received_at": now_text,
                 }
             )
@@ -293,10 +315,11 @@ class MailManager:
             "EasyMail 通知",
             "====================",
             f"📬 收到 {len(items)} 封新邮件",
-            f"📁 监听分组：{self.settings.telegram_mail_group if self.settings.telegram_mail_group != '__all__' else '全部邮箱'}",
+            f"📁 监听分组：{self._telegram_group_label()}",
         ]
         for item in items:
             lines.append(f"• {item['email']} | {item['subject']}")
+            lines.append(f"  发件人：{item.get('sender_email') or '-'}")
         if self.pending_mail_notifications:
             lines.append(f"… 其余 {len(self.pending_mail_notifications)} 封将继续在下一条通知中发送")
         try:
@@ -914,7 +937,7 @@ class MailManager:
                 self.settings.telegram_bot_token,
                 self.settings.telegram_chat_id,
                 self.settings.telegram_mail_mode,
-                self.settings.telegram_mail_group,
+                tuple(normalize_telegram_mail_groups(self.settings.telegram_mail_groups)),
             )
             self.settings.auto_receive_interval = int(
                 payload.get("auto_receive_interval", self.settings.auto_receive_interval) or 120
@@ -993,6 +1016,11 @@ class MailManager:
             self.settings.telegram_mail_group = str(
                 payload.get("telegram_mail_group", self.settings.telegram_mail_group) or "__all__"
             ).strip() or "__all__"
+            next_telegram_groups = normalize_telegram_mail_groups(
+                payload.get("telegram_mail_groups", self.settings.telegram_mail_groups)
+            )
+            self.settings.telegram_mail_groups = next_telegram_groups
+            self.settings.telegram_mail_group = next_telegram_groups[0] if next_telegram_groups else ""
             self.settings.telegram_mail_summary_minutes = max(
                 5,
                 int(payload.get("telegram_mail_summary_minutes", self.settings.telegram_mail_summary_minutes) or 60),
@@ -1039,7 +1067,7 @@ class MailManager:
                 self.settings.telegram_bot_token,
                 self.settings.telegram_chat_id,
                 self.settings.telegram_mail_mode,
-                self.settings.telegram_mail_group,
+                tuple(normalize_telegram_mail_groups(self.settings.telegram_mail_groups)),
             )
             if old_telegram_signature != new_telegram_signature and self._telegram_ready():
                 self.last_telegram_notification_cutoff_at = time.time()

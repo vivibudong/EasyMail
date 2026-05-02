@@ -113,6 +113,7 @@ export interface AppSettings {
   telegram_chat_id: string
   telegram_mail_mode: 'off' | 'instant' | 'hourly'
   telegram_mail_group: string
+  telegram_mail_groups: string[]
   telegram_mail_summary_minutes: number
   telegram_notify_backup: boolean
 }

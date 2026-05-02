@@ -92,6 +92,7 @@ class AppSettings:
     telegram_chat_id: str = ""
     telegram_mail_mode: str = "hourly"
     telegram_mail_group: str = "__all__"
+    telegram_mail_groups: list[str] = field(default_factory=list)
     telegram_mail_summary_minutes: int = 60
     telegram_notify_backup: bool = False
 
@@ -236,6 +237,7 @@ def settings_to_dict(settings: AppSettings) -> dict:
         "telegram_chat_id": settings.telegram_chat_id,
         "telegram_mail_mode": settings.telegram_mail_mode,
         "telegram_mail_group": settings.telegram_mail_group,
+        "telegram_mail_groups": normalize_telegram_mail_groups(settings.telegram_mail_groups),
         "telegram_mail_summary_minutes": settings.telegram_mail_summary_minutes,
         "telegram_notify_backup": settings.telegram_notify_backup,
     }
@@ -261,6 +263,17 @@ def normalize_import_delimiters(values: object) -> list[str]:
         if value not in cleaned:
             cleaned.append(value)
     return cleaned or DEFAULT_IMPORT_DELIMITERS.copy()
+
+
+def normalize_telegram_mail_groups(values: object) -> list[str]:
+    raw_values = values if isinstance(values, list) else []
+    cleaned: list[str] = []
+    for item in raw_values:
+        value = str(item).strip()
+        if not value or value in cleaned:
+            continue
+        cleaned.append(value)
+    return cleaned
 
 
 def settings_from_dict(data: dict) -> AppSettings:
@@ -300,6 +313,12 @@ def settings_from_dict(data: dict) -> AppSettings:
                     )
                 )
 
+    telegram_mail_groups = normalize_telegram_mail_groups(data.get("telegram_mail_groups", []))
+    if not telegram_mail_groups and "telegram_mail_groups" not in data:
+        legacy_group = str(data.get("telegram_mail_group", "") or "").strip()
+        if legacy_group:
+            telegram_mail_groups = [legacy_group]
+
     return AppSettings(
         auto_receive_interval=int(data.get("auto_receive_interval", 120) or 120),
         import_delimiters=normalize_import_delimiters(data.get("import_delimiters", DEFAULT_IMPORT_DELIMITERS)),
@@ -328,6 +347,7 @@ def settings_from_dict(data: dict) -> AppSettings:
         telegram_chat_id=str(data.get("telegram_chat_id", "") or ""),
         telegram_mail_mode=str(data.get("telegram_mail_mode", "hourly") or "hourly"),
         telegram_mail_group=str(data.get("telegram_mail_group", "__all__") or "__all__"),
+        telegram_mail_groups=telegram_mail_groups,
         telegram_mail_summary_minutes=int(data.get("telegram_mail_summary_minutes", 60) or 60),
         telegram_notify_backup=bool(data.get("telegram_notify_backup", False)),
     )
