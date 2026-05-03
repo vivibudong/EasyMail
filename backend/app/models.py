@@ -24,6 +24,7 @@ class MailItem:
     is_unread: bool = False
     is_starred: bool = False
     body_text: str = ""
+    body_html: str = ""
 
 
 @dataclass
@@ -127,6 +128,7 @@ def mail_item_to_dict(m: MailItem) -> dict:
         "is_unread": m.is_unread,
         "is_starred": m.is_starred,
         "body_text": m.body_text,
+        "body_html": m.body_html,
     }
 
 
@@ -154,6 +156,7 @@ def mail_item_from_dict(data: dict) -> Optional[MailItem]:
             is_unread=bool(data.get("is_unread", True)),
             is_starred=bool(data.get("is_starred", False)),
             body_text=str(data.get("body_text", "")),
+            body_html=str(data.get("body_html", "")),
         )
     except Exception:
         return None

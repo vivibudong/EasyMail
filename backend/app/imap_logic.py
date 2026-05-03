@@ -73,29 +73,52 @@ def format_shanghai_time(value: dt.datetime) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _decode_part_payload(part: email.message.Message) -> str:
+    payload = part.get_payload(decode=True)
+    if payload is None:
+        return ""
+    charset = part.get_content_charset() or "utf-8"
+    try:
+        return payload.decode(charset, errors="replace").strip()
+    except LookupError:
+        return payload.decode("utf-8", errors="replace").strip()
+
+
 def extract_body_text(msg: email.message.Message) -> str:
+    html_body = ""
     if msg.is_multipart():
         for part in msg.walk():
             content_type = part.get_content_type()
             disposition = str(part.get("Content-Disposition", ""))
             if content_type == "text/plain" and "attachment" not in disposition.lower():
-                payload = part.get_payload(decode=True)
-                if payload is None:
-                    continue
-                charset = part.get_content_charset() or "utf-8"
-                try:
-                    return payload.decode(charset, errors="replace").strip()
-                except LookupError:
-                    return payload.decode("utf-8", errors="replace").strip()
-        return "(该邮件没有可读纯文本正文)"
-    payload = msg.get_payload(decode=True)
-    if payload is None:
+                text_body = _decode_part_payload(part)
+                if text_body:
+                    if "<html" in text_body.lower() or "<table" in text_body.lower() or "<meta" in text_body.lower():
+                        return _html_to_text(text_body)
+                    return text_body
+            if content_type == "text/html" and "attachment" not in disposition.lower() and not html_body:
+                html_body = _decode_part_payload(part)
+        return _html_to_text(html_body) if html_body else "(该邮件没有可读正文)"
+    text_body = _decode_part_payload(msg)
+    if msg.get_content_type() == "text/html" or "<html" in text_body.lower() or "<table" in text_body.lower() or "<meta" in text_body.lower():
+        return _html_to_text(text_body)
+    return text_body
+
+
+def extract_body_html(msg: email.message.Message) -> str:
+    if msg.is_multipart():
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            disposition = str(part.get("Content-Disposition", ""))
+            if content_type == "text/html" and "attachment" not in disposition.lower():
+                html_body = _decode_part_payload(part)
+                if html_body:
+                    return html_body
         return ""
-    charset = msg.get_content_charset() or "utf-8"
-    try:
-        return payload.decode(charset, errors="replace").strip()
-    except LookupError:
-        return payload.decode("utf-8", errors="replace").strip()
+    if msg.get_content_type() == "text/html":
+        return _decode_part_payload(msg)
+    text_body = _decode_part_payload(msg)
+    return text_body if "<html" in text_body.lower() or "<table" in text_body.lower() else ""
 
 
 def _build_import_patterns(import_delimiters: list[str]) -> list[str]:
@@ -331,9 +354,44 @@ def _graph_request_json(
 def _html_to_text(raw_html: str) -> str:
     text = re.sub(r"<\s*br\s*/?\s*>", "\n", raw_html, flags=re.IGNORECASE)
     text = re.sub(r"</p\s*>", "\n\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</tr\s*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</td\s*>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1\s*>", "", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"<[^>]+>", "", text)
     text = html.unescape(text)
     text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
+
+
+def _sanitize_mail_html(raw_html: str, allow_remote_images: bool = False) -> str:
+    text = raw_html or ""
+    text = re.sub(r"<!doctype[^>]*>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<\s*meta[^>]*>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<\s*link[^>]*>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<\s*base[^>]*>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<(script|style|iframe|object|embed|form|input|button|textarea|select)[^>]*>.*?</\1\s*>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<\s*(script|style|iframe|object|embed|form|input|button|textarea|select)[^>]*>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+on[a-zA-Z]+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", text)
+    text = re.sub(r"\s+(href|src)\s*=\s*(\"|')\s*javascript:[^\"']*(\"|')", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+(href|src)\s*=\s*javascript:[^\s>]+", "", text, flags=re.IGNORECASE)
+
+    def replace_img(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        src_match = re.search(r"\ssrc\s*=\s*(\"([^\"]*)\"|'([^']*)'|([^\s>]+))", tag, flags=re.IGNORECASE)
+        src = html.unescape((src_match.group(2) or src_match.group(3) or src_match.group(4) or "").strip()) if src_match else ""
+        is_remote = bool(re.match(r"https?://", src, flags=re.IGNORECASE))
+        safe_src = html.escape(src, quote=True)
+        if is_remote and not allow_remote_images:
+            return f'<span class="mail-image-placeholder" data-src="{safe_src}">远程图片已拦截</span>'
+        if src:
+            clean_tag = re.sub(r"\ssrc\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", f' src="{safe_src}"', tag, flags=re.IGNORECASE)
+        else:
+            clean_tag = tag
+        clean_tag = re.sub(r"\s+on[a-zA-Z]+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", clean_tag)
+        return clean_tag
+
+    text = re.sub(r"<\s*img\b[^>]*>", replace_img, text, flags=re.IGNORECASE)
     return text.strip()
 
 
@@ -632,6 +690,7 @@ def fetch_mail_body(
     folder: str,
     source: str = "imap",
     progress_callback: Optional[Callable[[int, int, float], None]] = None,
+    mode: str = "text",
 ) -> tuple[str, str, int, float]:
     if source == "graph":
         access_token, error = get_graph_access_token(account)
@@ -648,7 +707,10 @@ def fetch_mail_body(
         if isinstance(body_payload, dict):
             content = str(body_payload.get("content", "") or "")
             content_type = str(body_payload.get("contentType", "text") or "text").lower()
-            body_text = _html_to_text(content) if content_type == "html" else content.strip()
+            if mode == "html":
+                body_text = _sanitize_mail_html(content) if content_type == "html" else f"<pre>{html.escape(content.strip())}</pre>"
+            else:
+                body_text = _html_to_text(content) if content_type == "html" else content.strip()
             return body_text, "OK", len(content.encode("utf-8", errors="ignore")), 0.01
         preview = str(payload.get("bodyPreview", "") or "")
         return preview, "OK", len(preview.encode("utf-8", errors="ignore")), 0.01
@@ -713,6 +775,11 @@ def fetch_mail_body(
             return "", "邮件正文为空", 0, 0.0
         msg = email.message_from_bytes(raw_bytes)
         duration = max(0.001, time.perf_counter() - started)
+        if mode == "html":
+            body = extract_body_html(msg)
+            if body:
+                return _sanitize_mail_html(body), "OK", len(raw_bytes), duration
+            return f"<pre>{html.escape(extract_body_text(msg))}</pre>", "OK", len(raw_bytes), duration
         return extract_body_text(msg), "OK", len(raw_bytes), duration
     except Exception as exc:
         return "", str(exc), 0, 0.0

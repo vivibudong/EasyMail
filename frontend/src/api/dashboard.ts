@@ -243,6 +243,15 @@ export async function getBodyStatus(localKey: string) {
   return data
 }
 
+export async function loadRawMailBody(localKey: string) {
+  const { data } = await apiClient.post<
+    ApiResponse<{
+      mail: MailItem
+    }>
+  >('/mails/raw-body', { local_key: localKey })
+  return data
+}
+
 export async function getSettings() {
   const { data } = await apiClient.get<ApiResponse<AppSettings>>('/settings')
   return data

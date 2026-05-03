@@ -69,6 +69,7 @@ export interface MailItem {
   is_starred: boolean
   has_body: boolean
   body_text: string
+  body_html: string
 }
 
 export interface BodyTask {

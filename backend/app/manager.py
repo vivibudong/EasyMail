@@ -579,6 +579,7 @@ class MailManager:
             "is_starred": item.is_starred,
             "has_body": bool(item.body_text),
             "body_text": item.body_text,
+            "body_html": item.body_html,
         }
 
     def dashboard_state(self) -> dict:
@@ -1117,6 +1118,40 @@ class MailManager:
             task = self.body_tasks.get(local_key, BodyTask())
             return {"mail": self.serialize_mail(item), "body_task": asdict(task)}
 
+    def load_raw_mail_body(self, local_key: str) -> dict:
+        with self.lock:
+            item = self.mail_items.get(local_key)
+            if not item:
+                raise ValueError("邮件不存在")
+            if item.body_html:
+                return {"mail": self.serialize_mail(item)}
+            account = self.find_account(item.account_email)
+            if not account:
+                raise ValueError("邮箱账号不存在")
+            msg_id = item.msg_id
+            folder = item.folder
+            source = item.source
+        body_html, status, size, duration = fetch_mail_body(
+            account,
+            msg_id,
+            folder,
+            source,
+            mode="html",
+        )
+        if status != "OK":
+            self.log_event("error", "mail_body", "raw_load_failed", local_key, "原始正文加载失败", {"error": status, "source": source})
+            raise ValueError(status)
+        with self.lock:
+            item = self.mail_items.get(local_key)
+            if not item:
+                raise ValueError("邮件不存在")
+            item.body_html = body_html
+            account = self.find_account(item.account_email)
+            if account:
+                self.storage.save_mail_cache(account)
+            self.log_event("info", "mail_body", "raw_load_success", local_key, "原始正文加载成功", {"source": source, "size": size, "duration": duration})
+            return {"mail": self.serialize_mail(item)}
+
     def refresh_all_tokens(self, trigger_source: str = "manual") -> dict:
         with self.lock:
             if self.token_refresh_running:
@@ -1484,6 +1519,7 @@ class MailManager:
                 item.folder,
                 item.source,
                 progress_callback=progress_callback,
+                mode="text",
             )
             with self.lock:
                 task = self.body_tasks.setdefault(item.local_key, BodyTask())

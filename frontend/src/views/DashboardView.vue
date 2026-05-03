@@ -381,6 +381,14 @@
                   <button
                     v-if="selectedMailKey"
                     class="btn btn-secondary btn-sm px-2 py-1"
+                    :disabled="loadingRawBody"
+                    @click="handleRawBody"
+                  >
+                    {{ showingRawBody ? '文本加载' : loadingRawBody ? '加载中...' : '原始加载' }}
+                  </button>
+                  <button
+                    v-if="selectedMailKey"
+                    class="btn btn-secondary btn-sm px-2 py-1"
                     @click="refreshMailBody"
                   >
                     刷新正文
@@ -405,6 +413,16 @@
                   <Icon name="mail" size="lg" class="empty-state-icon" />
                   <div class="empty-state-title text-sm">请选择一封邮件</div>
                   <div class="empty-state-description text-xs">正文将被后台下载并写入本地缓存。</div>
+                </div>
+                <div v-else-if="showingRawBody" class="mail-body mail-html-body">
+                  <div
+                    v-if="hasBlockedRemoteImages && !allowRemoteImages"
+                    class="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-800/60 dark:bg-amber-900/10 dark:text-amber-300"
+                  >
+                    邮件包含远程图片，已默认拦截。
+                    <button class="ml-2 font-semibold underline" @click="allowRemoteImages = true">加载远程图片</button>
+                  </div>
+                  <iframe class="mail-html-frame" sandbox="allow-popups allow-popups-to-escape-sandbox" :srcdoc="displayedRawHtml"></iframe>
                 </div>
                 <pre v-else class="mail-body">{{ displayedMailBody }}</pre>
               </div>
@@ -1006,6 +1024,7 @@ import {
   getGraphReauthStatus,
   getTokenRefreshHistory,
   importAccounts,
+  loadRawMailBody,
   openMail,
   receiveAccounts,
   reloginAccounts,
@@ -1063,6 +1082,9 @@ const selectedBodyTask = ref<BodyTask | null>(null)
 const translatedMailBody = ref('')
 const showingTranslatedBody = ref(false)
 const translatingBody = ref(false)
+const showingRawBody = ref(false)
+const loadingRawBody = ref(false)
+const allowRemoteImages = ref(false)
 const checkedAccounts = ref<string[]>([])
 const fileInput = ref<HTMLInputElement | null>(null)
 const restoreBackupInput = ref<HTMLInputElement | null>(null)
@@ -1456,6 +1478,32 @@ const displayedMailBody = computed(() => {
   return selectedMailDetail.value.body_text || '(正文为空)'
 })
 
+const hasBlockedRemoteImages = computed(() => {
+  return Boolean(selectedMailDetail.value?.body_html?.includes('data-src='))
+})
+
+const displayedRawHtml = computed(() => {
+  const body = selectedMailDetail.value?.body_html || '<p>原始正文为空</p>'
+  const hydrated = allowRemoteImages.value
+    ? body.replace(/<span class="mail-image-placeholder" data-src="([^"]*)">.*?<\/span>/g, '<img src="$1" alt="remote image" />')
+    : body
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <base target="_blank" />
+  <style>
+    html, body { margin: 0; padding: 0; background: transparent; color: #334155; font: 13px/1.65 sans-serif; overflow-wrap: anywhere; }
+    table { max-width: 100%; border-collapse: collapse; }
+    img { max-width: 100%; height: auto; }
+    a { color: #0284c7; }
+    .mail-image-placeholder { display: block; min-height: 88px; margin: 8px 0; border: 1px dashed #67e8f9; border-radius: 14px; background: #ecfeff; color: #0891b2; text-align: center; line-height: 88px; font-weight: 600; }
+  </style>
+</head>
+<body>${hydrated}</body>
+</html>`
+})
+
 const graphReauthStatusLabel = computed(() => {
   if (graphReauthDialog.value.status === 'completed') return '已完成'
   if (graphReauthDialog.value.status === 'failed') return '失败'
@@ -1626,7 +1674,10 @@ async function refreshState(silent = false) {
     if (selectedMailKey.value) {
       const current = response.data.mails.find((item) => item.local_key === selectedMailKey.value)
       if (current) {
-        selectedMailDetail.value = current
+        selectedMailDetail.value = {
+          ...current,
+          body_html: selectedMailDetail.value?.body_html || current.body_html,
+        }
       }
     }
   } catch (error: any) {
@@ -2131,6 +2182,8 @@ async function handleOpenMail(mail: MailItem) {
   selectedMailKey.value = mail.local_key
   translatedMailBody.value = ''
   showingTranslatedBody.value = false
+  showingRawBody.value = false
+  allowRemoteImages.value = false
   try {
     const response = await openMail(mail.local_key)
     selectedMailDetail.value = response.data.mail
@@ -2190,7 +2243,35 @@ async function refreshMailBody() {
   if (!selectedMailDetail.value) return
   translatedMailBody.value = ''
   showingTranslatedBody.value = false
+  showingRawBody.value = false
+  allowRemoteImages.value = false
   await handleOpenMail(selectedMailDetail.value)
+}
+
+async function handleRawBody() {
+  if (!selectedMailDetail.value) return
+  if (showingRawBody.value) {
+    showingRawBody.value = false
+    allowRemoteImages.value = false
+    return
+  }
+  if (selectedMailDetail.value.body_html) {
+    showingRawBody.value = true
+    showingTranslatedBody.value = false
+    return
+  }
+  loadingRawBody.value = true
+  try {
+    const response = await loadRawMailBody(selectedMailDetail.value.local_key)
+    selectedMailDetail.value = response.data.mail
+    showingRawBody.value = true
+    showingTranslatedBody.value = false
+    allowRemoteImages.value = false
+  } catch (error: any) {
+    showError(error?.response?.data?.detail || '原始正文加载失败')
+  } finally {
+    loadingRawBody.value = false
+  }
 }
 
 async function handleTranslateBody() {

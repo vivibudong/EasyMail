@@ -1068,6 +1068,17 @@ def body_status(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.post("/api/mails/raw-body")
+def raw_body(
+    payload: MailOpenRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    try:
+        return ok("原始正文已加载", manager.load_raw_mail_body(payload.local_key))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.patch("/api/mails/star")
 def toggle_mail_star(
     payload: MailStarRequest,
