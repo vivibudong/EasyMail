@@ -10,7 +10,7 @@
 
 ## 简介
 
-EasyMail 是一个基于 `FastAPI + Vue 3 + Docker` 的多邮箱管理工具，面向 Outlook / Hotmail / IMAP 邮箱的批量导入、登录、收件、正文查看、分组标签管理、任务调度与日志排查。
+EasyMail 是一个基于 `FastAPI + Vue 3 ` 的多邮箱管理工具，面向 Outlook / Hotmail / IMAP 邮箱的批量导入、登录、收件、正文查看、分组标签管理、任务调度与日志排查。
 
 ## 功能特性
 
