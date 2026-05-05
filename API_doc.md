@@ -139,6 +139,12 @@ GET /api/v1/mails/{local_key}
 | 参数 | 说明 |
 | --- | --- |
 | `include_body` | 是否返回正文，默认 `true` |
+| `wait_seconds` | `include_body=true` 时等待正文下载的秒数，默认 `8`，范围 `0-30` |
+
+说明：
+
+- 当 `include_body=true` 且正文尚未缓存时，接口会自动触发正文下载。
+- `wait_seconds` 只影响本次接口等待时间，不会取消后台正文下载任务。
 
 需要权限：`read:mails`
 
@@ -167,6 +173,14 @@ GET /api/v1/codes
 | `date_from` | 起始时间，ISO 格式 |
 | `date_to` | 结束时间，ISO 格式 |
 | `limit` | 返回数量，最大 200 |
+| `ensure_body` | 是否自动确保疑似验证码邮件正文已下载，默认 `true` |
+| `wait_seconds` | 等待正文下载和验证码提取的秒数，默认 `8`，范围 `0-30` |
+
+说明：
+
+- 默认情况下，接口会对疑似验证码邮件触发正文下载，并短暂等待验证码提取完成后返回。
+- 如果只想立即读取当前缓存结果，可传 `ensure_body=false&wait_seconds=0`。
+- 原有调用方式保持兼容，例如 `GET /api/v1/codes?account=user@example.com&limit=10` 不需要修改。
 
 需要权限：`read:mails`
 
