@@ -330,6 +330,35 @@ def _safe_mail(mail: MailItem, include_body: bool = False) -> dict:
     return item
 
 
+def _mail_matches_keyword(mail: MailItem, keyword: str) -> bool:
+    query = keyword.strip().lower()
+    if not query:
+        return True
+    code_text = " ".join(
+        " ".join(
+            str(value or "")
+            for value in (
+                code.get("code"),
+                code.get("context"),
+                code.get("matched_rule"),
+                code.get("from"),
+            )
+        )
+        for code in mail.verification_codes
+    )
+    fields = (
+        mail.account_email,
+        manager._folder_display_name(mail.folder),
+        mail.folder,
+        mail.subject,
+        mail.from_text,
+        mail.body_text,
+        mail.body_html,
+        code_text,
+    )
+    return any(query in str(value or "").lower() for value in fields)
+
+
 def _paginate(items: list, page: int, page_size: int) -> dict:
     page = max(1, page)
     page_size = max(1, min(200, page_size))
@@ -354,13 +383,7 @@ def _filter_code_mails(
         normalized = account.strip().lower()
         mails = [item for item in mails if item.account_email.lower() == normalized]
     if keyword:
-        query = keyword.lower()
-        mails = [
-            item for item in mails
-            if query in item.subject.lower()
-            or query in item.from_text.lower()
-            or query in item.account_email.lower()
-        ]
+        mails = [item for item in mails if _mail_matches_keyword(item, keyword)]
     if date_from:
         try:
             start_dt = dt.datetime.fromisoformat(date_from)
@@ -1606,8 +1629,7 @@ def api_v1_mails(
         if has_code is not None:
             mails = [item for item in mails if bool(item.verification_codes) is has_code]
         if keyword:
-            query = keyword.lower()
-            mails = [item for item in mails if query in item.account_email.lower() or query in item.subject.lower() or query in item.from_text.lower()]
+            mails = [item for item in mails if _mail_matches_keyword(item, keyword)]
         if date_from:
             try:
                 start_dt = dt.datetime.fromisoformat(date_from)

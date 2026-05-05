@@ -1341,7 +1341,40 @@ const starredAccountEmails = computed(() => {
   return new Set(allMails.value.filter((mail) => mail.is_starred).map((mail) => mail.account_email))
 })
 
-const visibleAccountsAll = computed(() => {
+function normalizeSearchValue(value: unknown) {
+  return String(value || '').toLowerCase()
+}
+
+function mailMatchesQuery(mail: MailItem, query: string) {
+  if (!query) return true
+  const codeText = (mail.verification_codes || [])
+    .map((item) => [item.code, item.context, item.matched_rule, item.from].filter(Boolean).join(' '))
+    .join(' ')
+  return [
+    mail.account_email,
+    mail.folder,
+    mail.subject,
+    mail.from_text,
+    mail.body_text,
+    mail.body_html,
+    codeText,
+  ].some((value) => normalizeSearchValue(value).includes(query))
+}
+
+function accountMatchesQuery(account: MailAccountSummary, query: string) {
+  if (!query) return true
+  return [
+    account.email,
+    account.group_name,
+    account.status,
+    account.auth_method,
+    account.note,
+    account.tags.join(' '),
+    account.last_error_summary,
+  ].some((value) => normalizeSearchValue(value).includes(query))
+}
+
+const taxonomyAccounts = computed(() => {
   let accounts = allAccounts.value
   if (selectedGroupKey.value === '__starred__') {
     accounts = accounts.filter((account) => starredAccountEmails.value.has(account.email))
@@ -1356,36 +1389,39 @@ const visibleAccountsAll = computed(() => {
         ? accounts.filter((account) => account.tags.length === 0)
         : accounts.filter((account) => account.tags.includes(selectedTagKey.value))
   }
+  return accounts
+})
+
+const taxonomyMails = computed(() => {
+  let mails = allMails.value
+  if (selectedGroupKey.value === '__starred__') {
+    mails = mails.filter((mail) => mail.is_starred)
+  }
+  const allowedEmails = new Set(taxonomyAccounts.value.map((account) => account.email))
+  mails = mails.filter((mail) => allowedEmails.has(mail.account_email))
+  if (selectedAccountEmail.value) {
+    mails = mails.filter((mail) => mail.account_email === selectedAccountEmail.value)
+  }
+  return mails
+})
+
+const visibleAccountsAll = computed(() => {
+  let accounts = taxonomyAccounts.value
   const query = searchTerm.value.trim().toLowerCase()
   if (query) {
-    accounts = accounts.filter(
-      (account) =>
-        account.email.toLowerCase().includes(query) ||
-        (account.group_name || '').toLowerCase().includes(query) ||
-        (account.status || '').toLowerCase().includes(query),
+    const matchedMailAccounts = new Set(
+      taxonomyMails.value.filter((mail) => mailMatchesQuery(mail, query)).map((mail) => mail.account_email),
     )
+    accounts = accounts.filter((account) => accountMatchesQuery(account, query) || matchedMailAccounts.has(account.email))
   }
   return accounts
 })
 
 const visibleMailsAll = computed(() => {
-  let mails = allMails.value
-  if (selectedGroupKey.value === '__starred__') {
-    mails = mails.filter((mail) => mail.is_starred)
-  }
-  const allowedEmails = new Set(visibleAccountsAll.value.map((account) => account.email))
-  mails = mails.filter((mail) => allowedEmails.has(mail.account_email))
-  if (selectedAccountEmail.value) {
-    mails = mails.filter((mail) => mail.account_email === selectedAccountEmail.value)
-  }
+  let mails = taxonomyMails.value
   const query = searchTerm.value.trim().toLowerCase()
   if (query) {
-    mails = mails.filter(
-      (mail) =>
-        mail.account_email.toLowerCase().includes(query) ||
-        mail.subject.toLowerCase().includes(query) ||
-        mail.from_text.toLowerCase().includes(query),
-    )
+    mails = mails.filter((mail) => mailMatchesQuery(mail, query))
   }
   return mails
 })
