@@ -547,6 +547,10 @@ class MailManager:
             "percent": percent,
         }
 
+    def queue_details(self) -> dict:
+        with self.lock:
+            return self._queue_progress()
+
     def overview(self) -> dict:
         return {
             "total_accounts": len(self.accounts),
@@ -665,6 +669,19 @@ class MailManager:
             account.flag_color = color
             self._save_accounts_state()
 
+    def batch_set_flag(self, emails: list[str], color: str) -> int:
+        changed = 0
+        with self.lock:
+            for email_addr in emails:
+                account = self.find_account(email_addr)
+                if not account:
+                    continue
+                account.flag_color = color
+                changed += 1
+            if changed:
+                self._save_accounts_state()
+        return changed
+
     def create_group(self, group_name: str, color: str = "#D6EAF8", priority: int = 100) -> list[dict]:
         with self.lock:
             normalized = self._normalize_group_name(group_name)
@@ -739,6 +756,25 @@ class MailManager:
             self._save_accounts_state()
             self.log_event("info", "account", "assign_group", email_addr, "修改邮箱分组", {"group_name": normalized})
 
+    def batch_assign_group(self, emails: list[str], group_name: str) -> int:
+        changed = 0
+        with self.lock:
+            normalized = self._normalize_group_name(group_name)
+            if normalized != "未分组" and not any(
+                item.name == normalized for item in self.settings.custom_groups
+            ):
+                raise ValueError("分组不存在，请先创建")
+            for email_addr in emails:
+                account = self.find_account(email_addr)
+                if not account:
+                    continue
+                account.group_name = normalized
+                changed += 1
+            if changed:
+                self._save_accounts_state()
+                self.log_event("info", "account", "batch_assign_group", normalized, "批量修改邮箱分组", {"emails": emails})
+        return changed
+
     def create_tag(self, tag_name: str, color: str = "#BFDBFE", priority: int = 100) -> list[dict]:
         with self.lock:
             normalized = self._normalize_tag_name(tag_name)
@@ -810,6 +846,68 @@ class MailManager:
             self._save_accounts_state()
             self.log_event("info", "account", "set_tags", email_addr, "设置邮箱标签", {"tags": cleaned})
             return account.tags
+
+    def patch_account_tags(self, email_addr: str, tags: list[str], mode: str = "add") -> list[str]:
+        with self.lock:
+            account = self.find_account(email_addr)
+            if not account:
+                raise ValueError("邮箱不存在")
+            valid_names = {item.name for item in self.settings.custom_tags}
+            cleaned = []
+            for item in tags:
+                name = str(item).strip()
+                if not name:
+                    continue
+                if name not in valid_names:
+                    raise ValueError(f"标签不存在: {name}")
+                if name not in cleaned:
+                    cleaned.append(name)
+            current = list(account.tags)
+            if mode == "remove":
+                account.tags = [item for item in current if item not in set(cleaned)]
+            elif mode == "replace":
+                account.tags = cleaned
+            else:
+                for item in cleaned:
+                    if item not in current:
+                        current.append(item)
+                account.tags = current
+            self._save_accounts_state()
+            self.log_event("info", "account", "patch_tags", email_addr, "更新邮箱标签", {"mode": mode, "tags": cleaned})
+            return account.tags
+
+    def batch_patch_account_tags(self, emails: list[str], tags: list[str], mode: str = "add") -> int:
+        changed = 0
+        with self.lock:
+            valid_names = {item.name for item in self.settings.custom_tags}
+            cleaned = []
+            for item in tags:
+                name = str(item).strip()
+                if not name:
+                    continue
+                if name not in valid_names:
+                    raise ValueError(f"标签不存在: {name}")
+                if name not in cleaned:
+                    cleaned.append(name)
+            for email_addr in emails:
+                account = self.find_account(email_addr)
+                if not account:
+                    continue
+                current = list(account.tags)
+                if mode == "remove":
+                    account.tags = [item for item in current if item not in set(cleaned)]
+                elif mode == "replace":
+                    account.tags = cleaned.copy()
+                else:
+                    for item in cleaned:
+                        if item not in current:
+                            current.append(item)
+                    account.tags = current
+                changed += 1
+            if changed:
+                self._save_accounts_state()
+                self.log_event("info", "account", "batch_patch_tags", "batch", "批量更新邮箱标签", {"mode": mode, "emails": emails, "tags": cleaned})
+        return changed
 
     def toggle_mail_star(self, local_key: str, is_starred: Optional[bool] = None) -> bool:
         with self.lock:
@@ -956,6 +1054,20 @@ class MailManager:
                 self.enqueue_login(account)
             self.log_event("info", "account", "import", "batch", "批量导入邮箱", {"imported": len(new_items), "changed": len(need_login)})
             return {"imported": len(new_items), "changed": len(need_login)}
+
+    def send_manual_notification(self, title: str, content: str) -> None:
+        if not self._telegram_ready():
+            raise ValueError("Telegram Bot 未配置或未启用")
+        text = "\n".join(
+            [
+                "EasyMail 通知",
+                "====================",
+                f"📣 {title.strip() or '手动通知'}",
+                content.strip(),
+            ]
+        ).strip()
+        self._send_telegram_message(text)
+        self.log_event("info", "notification", "manual_send", "telegram", "API 手动发送通知", {"title": title})
 
     def update_settings(self, payload: dict) -> dict:
         with self.lock:

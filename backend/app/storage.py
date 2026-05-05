@@ -98,6 +98,20 @@ class SqliteStorage:
 
                 CREATE INDEX IF NOT EXISTS idx_app_logs_category
                 ON app_logs(category);
+
+                CREATE TABLE IF NOT EXISTS api_tokens (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    scopes TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    last_used_at TEXT NOT NULL DEFAULT '',
+                    last_used_ip TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_api_tokens_hash
+                ON api_tokens(token_hash);
                 """
             )
 
@@ -391,3 +405,96 @@ class SqliteStorage:
                 }
             )
         return items
+
+    def create_api_token(self, token_id: str, name: str, token_hash: str, scopes: list[str]) -> dict[str, Any]:
+        now = dt.datetime.utcnow().isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO api_tokens(id, name, token_hash, scopes, enabled, created_at, last_used_at, last_used_ip)
+                VALUES(?, ?, ?, ?, 1, ?, '', '')
+                """,
+                (token_id, name, token_hash, json.dumps(scopes, ensure_ascii=False), now),
+            )
+        return {
+            "id": token_id,
+            "name": name,
+            "scopes": scopes,
+            "enabled": True,
+            "created_at": now,
+            "last_used_at": "",
+            "last_used_ip": "",
+        }
+
+    def find_api_token_by_hash(self, token_hash: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, name, scopes, enabled, created_at, last_used_at, last_used_ip
+                FROM api_tokens
+                WHERE token_hash = ?
+                """,
+                (token_hash,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            scopes = json.loads(str(row["scopes"]))
+        except Exception:
+            scopes = []
+        return {
+            "id": str(row["id"]),
+            "name": str(row["name"]),
+            "scopes": [str(item) for item in scopes if str(item).strip()],
+            "enabled": bool(row["enabled"]),
+            "created_at": str(row["created_at"]),
+            "last_used_at": str(row["last_used_at"]),
+            "last_used_ip": str(row["last_used_ip"]),
+        }
+
+    def touch_api_token(self, token_id: str, ip_address: str = "") -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE api_tokens
+                SET last_used_at = ?, last_used_ip = ?
+                WHERE id = ?
+                """,
+                (dt.datetime.utcnow().isoformat(), ip_address, token_id),
+            )
+
+    def list_api_tokens(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, name, scopes, enabled, created_at, last_used_at, last_used_ip
+                FROM api_tokens
+                ORDER BY created_at DESC
+                """
+            ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                scopes = json.loads(str(row["scopes"]))
+            except Exception:
+                scopes = []
+            items.append(
+                {
+                    "id": str(row["id"]),
+                    "name": str(row["name"]),
+                    "scopes": [str(item) for item in scopes if str(item).strip()],
+                    "enabled": bool(row["enabled"]),
+                    "created_at": str(row["created_at"]),
+                    "last_used_at": str(row["last_used_at"]),
+                    "last_used_ip": str(row["last_used_ip"]),
+                }
+            )
+        return items
+
+    def set_api_token_enabled(self, token_id: str, enabled: bool) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE api_tokens SET enabled = ? WHERE id = ?",
+                (1 if enabled else 0, token_id),
+            )
+        return cursor.rowcount > 0

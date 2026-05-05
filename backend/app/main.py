@@ -18,13 +18,13 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .auth import create_access_token, get_current_user
+from .auth import create_access_token, get_current_user, security
 from .config import config, update_admin_credentials
 from .manager import MailManager
 from .models import DEFAULT_IMPORT_DELIMITERS, MailAccount
@@ -35,6 +35,18 @@ MANUAL_OAUTH_SCOPE = GRAPH_REAUTH_SCOPE
 MICROSOFT_CONSUMERS_BASE_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0"
 PROJECT_REPO = "vivibudong/EasyMail"
 PROJECT_RELEASES_URL = f"https://github.com/{PROJECT_REPO}/releases"
+API_SCOPES = {
+    "read:accounts",
+    "read:mails",
+    "write:accounts",
+    "write:taxonomy",
+    "task:receive",
+    "task:login",
+    "task:backup",
+    "notify:send",
+    "read:logs",
+    "admin:tokens",
+}
 
 storage = SqliteStorage(config.data_dir)
 manager = MailManager(storage)
@@ -172,6 +184,74 @@ class TranslateRequest(BaseModel):
     text: str
 
 
+class ApiTokenCreateRequest(BaseModel):
+    name: str
+    scopes: list[str] = Field(default_factory=list)
+
+
+class ApiGroupRequest(BaseModel):
+    name: str
+    color: str = "#D6EAF8"
+    priority: int = 100
+
+
+class ApiTagRequest(BaseModel):
+    name: str
+    color: str = "#BFDBFE"
+    priority: int = 100
+
+
+class ApiAccountGroupRequest(BaseModel):
+    group_name: str
+
+
+class ApiBatchGroupRequest(BaseModel):
+    emails: list[str] = Field(default_factory=list)
+    group_name: str
+
+
+class ApiTagsRequest(BaseModel):
+    tags: list[str] = Field(default_factory=list)
+
+
+class ApiBatchTagsRequest(BaseModel):
+    emails: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+
+
+class ApiFlagRequest(BaseModel):
+    flag_color: str = ""
+
+
+class ApiBatchFlagRequest(BaseModel):
+    emails: list[str] = Field(default_factory=list)
+    flag_color: str = ""
+
+
+class ApiAccountImportRequest(BaseModel):
+    mode: str = "text"
+    content: str
+
+
+class ApiTaskTargetRequest(BaseModel):
+    emails: list[str] = Field(default_factory=list)
+    include_all: bool = False
+    group_name: str = ""
+    tag_name: str = ""
+
+
+class ApiBackupRequest(BaseModel):
+    include_accounts: bool = True
+    include_settings: bool = True
+    include_taxonomy: bool = True
+    include_logs: bool = False
+
+
+class ApiNotificationRequest(BaseModel):
+    title: str = "手动通知"
+    content: str
+
+
 class SettingsRequest(BaseModel):
     auto_receive_interval: int = 120
     import_delimiters: list[str] = Field(default_factory=lambda: DEFAULT_IMPORT_DELIMITERS.copy())
@@ -204,6 +284,125 @@ class SettingsRequest(BaseModel):
 
 def ok(message: str, data: Optional[dict] = None) -> dict:
     return {"success": True, "message": message, "data": data or {}}
+
+
+def api_ok(message: str = "ok", data: Optional[dict] = None, request_id: str = "") -> dict:
+    return {
+        "success": True,
+        "message": message,
+        "data": data or {},
+        "request_id": request_id or f"req_{uuid4().hex}",
+    }
+
+
+def _hash_api_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _clean_scopes(scopes: list[str]) -> list[str]:
+    cleaned = []
+    for item in scopes:
+        scope = str(item).strip()
+        if not scope:
+            continue
+        if scope not in API_SCOPES:
+            raise ValueError(f"未知权限: {scope}")
+        if scope not in cleaned:
+            cleaned.append(scope)
+    return cleaned
+
+
+def _safe_account(account: MailAccount, index: int = 0) -> dict:
+    return {
+        **manager.serialize_account(account, index),
+        "has_password": bool(account.password),
+        "has_token": bool(account.token),
+        "has_client_id": bool(account.auth_code_or_client_id),
+    }
+
+
+def _safe_mail(mail: MailItem, include_body: bool = False) -> dict:
+    item = manager.serialize_mail(mail)
+    if not include_body:
+        item.pop("body_text", None)
+        item.pop("body_html", None)
+    return item
+
+
+def _paginate(items: list, page: int, page_size: int) -> dict:
+    page = max(1, page)
+    page_size = max(1, min(200, page_size))
+    total = len(items)
+    start = (page - 1) * page_size
+    return {
+        "items": items[start:start + page_size],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+def _request_id(request: Request) -> str:
+    return request.headers.get("X-Request-ID") or f"req_{uuid4().hex}"
+
+
+def _api_audit(request: Request, user: dict, action: str, subject: str, detail: Optional[dict] = None) -> None:
+    manager.log_event(
+        "info",
+        "api",
+        action,
+        subject,
+        "API 调用",
+        {
+            "token_id": user.get("token_id"),
+            "token_name": user.get("token_name"),
+            "ip": request.client.host if request.client else "",
+            **(detail or {}),
+        },
+    )
+
+
+def require_api_scope(scope: str):
+    def dependency(
+        request: Request,
+        credentials=Depends(security),
+    ) -> dict:
+        if credentials is None or credentials.scheme.lower() != "bearer":
+            raise HTTPException(status_code=401, detail="缺少 API Token")
+        token = credentials.credentials.strip()
+        item = storage.find_api_token_by_hash(_hash_api_token(token))
+        if not item or not item.get("enabled"):
+            raise HTTPException(status_code=401, detail="API Token 无效或已禁用")
+        scopes = set(item.get("scopes", []))
+        if scope not in scopes:
+            raise HTTPException(status_code=403, detail=f"缺少权限: {scope}")
+        storage.touch_api_token(str(item["id"]), request.client.host if request.client else "")
+        return {
+            "token_id": item["id"],
+            "token_name": item["name"],
+            "scopes": item["scopes"],
+            "role": "api",
+        }
+
+    return dependency
+
+
+def _resolve_api_targets(payload: ApiTaskTargetRequest) -> list[MailAccount]:
+    with manager.lock:
+        if payload.include_all:
+            return manager.accounts.copy()
+        if payload.group_name:
+            return [
+                account for account in manager.accounts
+                if (account.group_name or "未分组") == payload.group_name
+            ]
+        if payload.tag_name:
+            return [
+                account for account in manager.accounts
+                if payload.tag_name in account.tags
+            ]
+        emails = {item.strip().lower() for item in payload.emails if item.strip()}
+        return [account for account in manager.accounts if account.email.lower() in emails]
 
 
 def _normalize_version(value: str) -> str:
@@ -591,6 +790,43 @@ def login(payload: LoginRequest) -> dict:
 @app.get("/api/auth/me")
 def me(current_user: dict = Depends(get_current_user)) -> dict:
     return ok("ok", {"user": current_user})
+
+
+@app.get("/api/api-tokens")
+def list_api_tokens(current_user: dict = Depends(get_current_user)) -> dict:
+    return ok("ok", {"items": storage.list_api_tokens(), "available_scopes": sorted(API_SCOPES)})
+
+
+@app.post("/api/api-tokens")
+def create_api_token(
+    payload: ApiTokenCreateRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Token 名称不能为空")
+    try:
+        scopes = _clean_scopes(payload.scopes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not scopes:
+        raise HTTPException(status_code=400, detail="至少选择一个权限")
+    raw_token = f"em_{secrets.token_urlsafe(36)}"
+    token_id = uuid4().hex
+    item = storage.create_api_token(token_id, name, _hash_api_token(raw_token), scopes)
+    manager.log_event("info", "api_token", "create", token_id, "创建 API Token", {"name": name, "scopes": scopes})
+    return ok("API Token 已创建，请立即复制保存", {"token": raw_token, "item": item})
+
+
+@app.post("/api/api-tokens/{token_id}/disable")
+def disable_api_token(
+    token_id: str,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    if not storage.set_api_token_enabled(token_id, False):
+        raise HTTPException(status_code=404, detail="API Token 不存在")
+    manager.log_event("warn", "api_token", "disable", token_id, "禁用 API Token")
+    return ok("API Token 已禁用")
 
 
 @app.put("/api/auth/admin-credentials")
@@ -1182,25 +1418,6 @@ def list_logs(
     )
 
 
-WEB_DIST_DIR = Path("/app/frontend_dist")
-
-if WEB_DIST_DIR.exists():
-    assets_dir = WEB_DIST_DIR / "assets"
-    if assets_dir.exists():
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
-
-    @app.get("/", include_in_schema=False)
-    def serve_index() -> FileResponse:
-        return FileResponse(WEB_DIST_DIR / "index.html")
-
-    @app.get("/{full_path:path}", include_in_schema=False)
-    def serve_spa(full_path: str):
-        candidate = WEB_DIST_DIR / full_path
-        if candidate.is_file():
-            return FileResponse(candidate)
-        return FileResponse(WEB_DIST_DIR / "index.html")
-
-
 @app.post("/api/mails/open")
 def open_mail(
     payload: MailOpenRequest,
@@ -1244,3 +1461,582 @@ def toggle_mail_star(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ok("星标状态已更新", {"is_starred": state})
+
+
+@app.get("/api/v1/overview")
+def api_v1_overview(
+    request: Request,
+    api_user: dict = Depends(require_api_scope("read:accounts")),
+) -> dict:
+    state = manager.dashboard_state()
+    return api_ok("ok", {"overview": state["overview"], "queue": state["overview"].get("queue", {}), "settings": state["settings"]}, _request_id(request))
+
+
+@app.get("/api/v1/accounts")
+def api_v1_accounts(
+    request: Request,
+    group: str = Query(default=""),
+    tag: str = Query(default=""),
+    status: str = Query(default=""),
+    auth_method: str = Query(default=""),
+    keyword: str = Query(default=""),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    api_user: dict = Depends(require_api_scope("read:accounts")),
+) -> dict:
+    with manager.lock:
+        accounts = manager.accounts.copy()
+        if group:
+            accounts = [item for item in accounts if (item.group_name or "未分组") == group]
+        if tag:
+            accounts = [item for item in accounts if tag in item.tags]
+        if status:
+            accounts = [item for item in accounts if item.status == status]
+        if auth_method:
+            accounts = [item for item in accounts if item.auth_method == auth_method]
+        if keyword:
+            query = keyword.lower()
+            accounts = [
+                item for item in accounts
+                if query in item.email.lower()
+                or query in (item.group_name or "").lower()
+                or query in item.status.lower()
+            ]
+        items = [_safe_account(account, index + 1) for index, account in enumerate(accounts)]
+    return api_ok("ok", _paginate(items, page, page_size), _request_id(request))
+
+
+@app.get("/api/v1/accounts/{email_addr}")
+def api_v1_account_detail(
+    request: Request,
+    email_addr: str,
+    api_user: dict = Depends(require_api_scope("read:accounts")),
+) -> dict:
+    with manager.lock:
+        account = manager.find_account(email_addr)
+        if not account:
+            raise HTTPException(status_code=404, detail="邮箱不存在")
+        data = _safe_account(account, manager.accounts.index(account) + 1)
+    return api_ok("ok", {"account": data}, _request_id(request))
+
+
+@app.get("/api/v1/mails")
+def api_v1_mails(
+    request: Request,
+    account: str = Query(default=""),
+    group: str = Query(default=""),
+    tag: str = Query(default=""),
+    folder: str = Query(default=""),
+    starred: Optional[bool] = Query(default=None),
+    unread: Optional[bool] = Query(default=None),
+    has_code: Optional[bool] = Query(default=None),
+    keyword: str = Query(default=""),
+    date_from: str = Query(default=""),
+    date_to: str = Query(default=""),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    api_user: dict = Depends(require_api_scope("read:mails")),
+) -> dict:
+    with manager.lock:
+        allowed_accounts = {item.email: item for item in manager.accounts}
+        mails = manager.all_mails.copy()
+        if account:
+            mails = [item for item in mails if item.account_email == account]
+        if group:
+            mails = [item for item in mails if allowed_accounts.get(item.account_email) and (allowed_accounts[item.account_email].group_name or "未分组") == group]
+        if tag:
+            mails = [item for item in mails if allowed_accounts.get(item.account_email) and tag in allowed_accounts[item.account_email].tags]
+        if folder:
+            mails = [item for item in mails if manager._folder_display_name(item.folder) == folder or item.folder == folder]
+        if starred is not None:
+            mails = [item for item in mails if item.is_starred is starred]
+        if unread is not None:
+            mails = [item for item in mails if item.is_unread is unread]
+        if has_code is not None:
+            mails = [item for item in mails if bool(item.verification_codes) is has_code]
+        if keyword:
+            query = keyword.lower()
+            mails = [item for item in mails if query in item.account_email.lower() or query in item.subject.lower() or query in item.from_text.lower()]
+        if date_from:
+            try:
+                start_dt = dt.datetime.fromisoformat(date_from)
+                mails = [item for item in mails if item.date_value >= start_dt]
+            except ValueError:
+                raise HTTPException(status_code=400, detail="date_from 格式无效")
+        if date_to:
+            try:
+                end_dt = dt.datetime.fromisoformat(date_to)
+                mails = [item for item in mails if item.date_value <= end_dt]
+            except ValueError:
+                raise HTTPException(status_code=400, detail="date_to 格式无效")
+        items = [_safe_mail(item) for item in mails]
+    return api_ok("ok", _paginate(items, page, page_size), _request_id(request))
+
+
+@app.get("/api/v1/mails/{local_key}")
+def api_v1_mail_detail(
+    request: Request,
+    local_key: str,
+    include_body: bool = Query(default=True),
+    api_user: dict = Depends(require_api_scope("read:mails")),
+) -> dict:
+    with manager.lock:
+        item = manager.mail_items.get(local_key)
+        if not item:
+            raise HTTPException(status_code=404, detail="邮件不存在")
+        data = _safe_mail(item, include_body=include_body)
+    return api_ok("ok", {"mail": data}, _request_id(request))
+
+
+@app.get("/api/v1/mails/{local_key}/codes")
+def api_v1_mail_codes(
+    request: Request,
+    local_key: str,
+    api_user: dict = Depends(require_api_scope("read:mails")),
+) -> dict:
+    with manager.lock:
+        item = manager.mail_items.get(local_key)
+        if not item:
+            raise HTTPException(status_code=404, detail="邮件不存在")
+        codes = item.verification_codes
+    return api_ok("ok", {"items": codes}, _request_id(request))
+
+
+@app.get("/api/v1/codes")
+def api_v1_codes(
+    request: Request,
+    account: str = Query(default=""),
+    keyword: str = Query(default=""),
+    date_from: str = Query(default=""),
+    date_to: str = Query(default=""),
+    limit: int = Query(default=20, ge=1, le=200),
+    api_user: dict = Depends(require_api_scope("read:mails")),
+) -> dict:
+    with manager.lock:
+        mails = [item for item in manager.all_mails if item.verification_codes]
+        if account:
+            mails = [item for item in mails if item.account_email == account]
+        if keyword:
+            query = keyword.lower()
+            mails = [item for item in mails if query in item.subject.lower() or query in item.from_text.lower() or query in item.account_email.lower()]
+        if date_from:
+            try:
+                start_dt = dt.datetime.fromisoformat(date_from)
+                mails = [item for item in mails if item.date_value >= start_dt]
+            except ValueError:
+                raise HTTPException(status_code=400, detail="date_from 格式无效")
+        if date_to:
+            try:
+                end_dt = dt.datetime.fromisoformat(date_to)
+                mails = [item for item in mails if item.date_value <= end_dt]
+            except ValueError:
+                raise HTTPException(status_code=400, detail="date_to 格式无效")
+        items = []
+        for mail in mails:
+            for code in mail.verification_codes:
+                items.append(
+                    {
+                        **code,
+                        "account_email": mail.account_email,
+                        "subject": mail.subject,
+                        "from_text": mail.from_text,
+                        "received_at": mail.date_value.isoformat(),
+                        "mail_key": mail.local_key,
+                    }
+                )
+        items = items[:limit]
+    return api_ok("ok", {"items": items}, _request_id(request))
+
+
+@app.get("/api/v1/groups")
+def api_v1_groups(
+    request: Request,
+    api_user: dict = Depends(require_api_scope("read:accounts")),
+) -> dict:
+    groups = manager.dashboard_state()["settings"].get("custom_groups", [])
+    return api_ok("ok", {"items": groups}, _request_id(request))
+
+
+@app.post("/api/v1/groups")
+def api_v1_create_group(
+    request: Request,
+    payload: ApiGroupRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        groups = manager.create_group(payload.name, payload.color, payload.priority)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "create_group", payload.name, payload.model_dump())
+    return api_ok("分组已创建", {"items": groups}, _request_id(request))
+
+
+@app.patch("/api/v1/groups/{group_name}")
+def api_v1_update_group(
+    request: Request,
+    group_name: str,
+    payload: ApiGroupRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        groups = manager.update_group(group_name, payload.name, payload.color, payload.priority)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "update_group", group_name, payload.model_dump())
+    return api_ok("分组已更新", {"items": groups}, _request_id(request))
+
+
+@app.delete("/api/v1/groups/{group_name}")
+def api_v1_delete_group(
+    request: Request,
+    group_name: str,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        groups = manager.delete_group(group_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "delete_group", group_name)
+    return api_ok("分组已删除，邮箱已归入未分组", {"items": groups}, _request_id(request))
+
+
+@app.get("/api/v1/tags")
+def api_v1_tags(
+    request: Request,
+    api_user: dict = Depends(require_api_scope("read:accounts")),
+) -> dict:
+    tags = manager.dashboard_state()["settings"].get("custom_tags", [])
+    return api_ok("ok", {"items": tags}, _request_id(request))
+
+
+@app.post("/api/v1/tags")
+def api_v1_create_tag(
+    request: Request,
+    payload: ApiTagRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        tags = manager.create_tag(payload.name, payload.color, payload.priority)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "create_tag", payload.name, payload.model_dump())
+    return api_ok("标签已创建", {"items": tags}, _request_id(request))
+
+
+@app.patch("/api/v1/tags/{tag_name}")
+def api_v1_update_tag(
+    request: Request,
+    tag_name: str,
+    payload: ApiTagRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        tags = manager.update_tag(tag_name, payload.name, payload.color, payload.priority)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "update_tag", tag_name, payload.model_dump())
+    return api_ok("标签已更新", {"items": tags}, _request_id(request))
+
+
+@app.delete("/api/v1/tags/{tag_name}")
+def api_v1_delete_tag(
+    request: Request,
+    tag_name: str,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        tags = manager.delete_tag(tag_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "delete_tag", tag_name)
+    return api_ok("标签已删除", {"items": tags}, _request_id(request))
+
+
+@app.patch("/api/v1/accounts/{email_addr}/group")
+def api_v1_account_group(
+    request: Request,
+    email_addr: str,
+    payload: ApiAccountGroupRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        manager.assign_group(email_addr, payload.group_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "assign_group", email_addr, payload.model_dump())
+    return api_ok("邮箱分组已更新", {"email": email_addr, "group_name": payload.group_name}, _request_id(request))
+
+
+@app.patch("/api/v1/accounts/batch/group")
+def api_v1_batch_group(
+    request: Request,
+    payload: ApiBatchGroupRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        changed = manager.batch_assign_group(payload.emails, payload.group_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "batch_assign_group", payload.group_name, payload.model_dump())
+    return api_ok("批量分组已更新", {"changed": changed}, _request_id(request))
+
+
+@app.put("/api/v1/accounts/{email_addr}/tags")
+def api_v1_replace_tags(
+    request: Request,
+    email_addr: str,
+    payload: ApiTagsRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        tags = manager.patch_account_tags(email_addr, payload.tags, "replace")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "replace_tags", email_addr, payload.model_dump())
+    return api_ok("邮箱标签已覆盖", {"email": email_addr, "tags": tags}, _request_id(request))
+
+
+@app.post("/api/v1/accounts/{email_addr}/tags")
+def api_v1_add_tags(
+    request: Request,
+    email_addr: str,
+    payload: ApiTagsRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        tags = manager.patch_account_tags(email_addr, payload.tags, "add")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "add_tags", email_addr, payload.model_dump())
+    return api_ok("邮箱标签已添加", {"email": email_addr, "tags": tags}, _request_id(request))
+
+
+@app.delete("/api/v1/accounts/{email_addr}/tags")
+def api_v1_remove_tags(
+    request: Request,
+    email_addr: str,
+    payload: ApiTagsRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        tags = manager.patch_account_tags(email_addr, payload.tags, "remove")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "remove_tags", email_addr, payload.model_dump())
+    return api_ok("邮箱标签已移除", {"email": email_addr, "tags": tags}, _request_id(request))
+
+
+@app.post("/api/v1/accounts/batch/tags")
+def api_v1_batch_add_tags(
+    request: Request,
+    payload: ApiBatchTagsRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        changed = manager.batch_patch_account_tags(payload.emails, payload.tags, "add")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "batch_add_tags", "batch", payload.model_dump())
+    return api_ok("批量标签已添加", {"changed": changed}, _request_id(request))
+
+
+@app.delete("/api/v1/accounts/batch/tags")
+def api_v1_batch_remove_tags(
+    request: Request,
+    payload: ApiBatchTagsRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        changed = manager.batch_patch_account_tags(payload.emails, payload.tags, "remove")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "batch_remove_tags", "batch", payload.model_dump())
+    return api_ok("批量标签已移除", {"changed": changed}, _request_id(request))
+
+
+@app.patch("/api/v1/accounts/{email_addr}/flag")
+def api_v1_set_flag(
+    request: Request,
+    email_addr: str,
+    payload: ApiFlagRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        manager.set_flag(email_addr, payload.flag_color)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "set_flag", email_addr, payload.model_dump())
+    return api_ok("旗标已更新", {"email": email_addr, "flag_color": payload.flag_color}, _request_id(request))
+
+
+@app.delete("/api/v1/accounts/{email_addr}/flag")
+def api_v1_clear_flag(
+    request: Request,
+    email_addr: str,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        manager.set_flag(email_addr, "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "clear_flag", email_addr)
+    return api_ok("旗标已取消", {"email": email_addr, "flag_color": ""}, _request_id(request))
+
+
+@app.patch("/api/v1/accounts/batch/flag")
+def api_v1_batch_set_flag(
+    request: Request,
+    payload: ApiBatchFlagRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    changed = manager.batch_set_flag(payload.emails, payload.flag_color)
+    _api_audit(request, api_user, "batch_set_flag", "batch", payload.model_dump())
+    return api_ok("批量旗标已更新", {"changed": changed}, _request_id(request))
+
+
+@app.delete("/api/v1/accounts/batch/flag")
+def api_v1_batch_clear_flag(
+    request: Request,
+    payload: ApiBatchFlagRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    changed = manager.batch_set_flag(payload.emails, "")
+    _api_audit(request, api_user, "batch_clear_flag", "batch", {"emails": payload.emails})
+    return api_ok("批量旗标已取消", {"changed": changed}, _request_id(request))
+
+
+@app.post("/api/v1/accounts/import")
+def api_v1_import_accounts(
+    request: Request,
+    payload: ApiAccountImportRequest,
+    api_user: dict = Depends(require_api_scope("write:accounts")),
+) -> dict:
+    if payload.mode != "text":
+        raise HTTPException(status_code=400, detail="当前接口仅支持 mode=text")
+    try:
+        result = manager.import_accounts(payload.content.encode("utf-8"))
+    except (ValueError, re.error) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "import_accounts", "text", {"imported": result.get("imported"), "changed": result.get("changed")})
+    return api_ok("账号导入完成", result, _request_id(request))
+
+
+@app.post("/api/v1/accounts/import-file")
+async def api_v1_import_accounts_file(
+    request: Request,
+    file: UploadFile = File(...),
+    api_user: dict = Depends(require_api_scope("write:accounts")),
+) -> dict:
+    file_bytes = await file.read()
+    try:
+        result = manager.import_accounts(file_bytes)
+    except (ValueError, re.error) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "import_accounts_file", file.filename or "file", {"imported": result.get("imported"), "changed": result.get("changed")})
+    return api_ok("账号导入完成", result, _request_id(request))
+
+
+@app.post("/api/v1/tasks/receive")
+def api_v1_receive(
+    request: Request,
+    payload: ApiTaskTargetRequest,
+    api_user: dict = Depends(require_api_scope("task:receive")),
+) -> dict:
+    targets = _resolve_api_targets(payload)
+    queued = manager.start_receive_batch(targets)
+    _api_audit(request, api_user, "receive", "batch", {"queued": queued})
+    return api_ok("收件任务已加入队列", {"queued": queued, "queue": manager.queue_details()}, _request_id(request))
+
+
+@app.post("/api/v1/tasks/relogin")
+def api_v1_relogin(
+    request: Request,
+    payload: ApiTaskTargetRequest,
+    api_user: dict = Depends(require_api_scope("task:login")),
+) -> dict:
+    targets = _resolve_api_targets(payload)
+    queued = manager.start_relogin_batch(targets)
+    _api_audit(request, api_user, "relogin", "batch", {"queued": queued})
+    return api_ok("重新登录任务已加入队列", {"queued": queued, "queue": manager.queue_details()}, _request_id(request))
+
+
+@app.get("/api/v1/tasks")
+def api_v1_tasks(
+    request: Request,
+    api_user: dict = Depends(require_api_scope("read:accounts")),
+) -> dict:
+    return api_ok("ok", {"queue": manager.queue_details()}, _request_id(request))
+
+
+@app.post("/api/v1/backups/run")
+def api_v1_backup(
+    request: Request,
+    payload: ApiBackupRequest,
+    api_user: dict = Depends(require_api_scope("task:backup")),
+) -> dict:
+    try:
+        result = manager.backup_accounts_now(trigger_source="api")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "backup", "api", payload.model_dump())
+    return api_ok("备份已完成", result, _request_id(request))
+
+
+@app.post("/api/v1/notifications/send")
+def api_v1_notify(
+    request: Request,
+    payload: ApiNotificationRequest,
+    api_user: dict = Depends(require_api_scope("notify:send")),
+) -> dict:
+    if not payload.content.strip():
+        raise HTTPException(status_code=400, detail="通知内容不能为空")
+    try:
+        manager.send_manual_notification(payload.title, payload.content)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"通知发送失败: {exc}") from exc
+    _api_audit(request, api_user, "notify_send", "telegram", {"title": payload.title})
+    return api_ok("通知已发送", {}, _request_id(request))
+
+
+@app.get("/api/v1/logs")
+def api_v1_logs(
+    request: Request,
+    category: str = Query(default=""),
+    level: str = Query(default=""),
+    keyword: str = Query(default=""),
+    limit: int = Query(default=200, ge=1, le=1000),
+    api_user: dict = Depends(require_api_scope("read:logs")),
+) -> dict:
+    return api_ok(
+        "ok",
+        {"items": storage.list_logs(category=category.strip(), level=level.strip(), keyword=keyword.strip(), limit=limit)},
+        _request_id(request),
+    )
+
+
+@app.get("/api/v1/system/version")
+def api_v1_system_version(
+    request: Request,
+    force: bool = Query(False),
+    api_user: dict = Depends(require_api_scope("read:accounts")),
+) -> dict:
+    return api_ok("ok", _version_payload(force=force), _request_id(request))
+
+
+WEB_DIST_DIR = Path("/app/frontend_dist")
+
+if WEB_DIST_DIR.exists():
+    assets_dir = WEB_DIST_DIR / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    def serve_index() -> FileResponse:
+        return FileResponse(WEB_DIST_DIR / "index.html")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def serve_spa(full_path: str):
+        candidate = WEB_DIST_DIR / full_path
+        if candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(WEB_DIST_DIR / "index.html")
