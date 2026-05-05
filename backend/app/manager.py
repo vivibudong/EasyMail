@@ -15,6 +15,7 @@ from dataclasses import asdict
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from .code_extractor import extract_verification_codes
 from .imap_logic import (
     fetch_mail_body,
     fetch_mails_once,
@@ -89,15 +90,19 @@ class MailManager:
 
         repaired_accounts = self._repair_legacy_imported_accounts()
         repaired_mail_cache = 0
+        extracted_code_cache = 0
         for account in self.accounts:
             if not account.group_name:
                 account.group_name = "未分组"
             account.mails = self.storage.load_mail_cache(account, self.local_read_keys)
             account_cache_repairs = self._repair_mail_folder_cache(account)
             repaired_mail_cache += account_cache_repairs
+            for mail in account.mails:
+                if self.refresh_verification_codes(mail):
+                    extracted_code_cache += 1
             if account.mails and account.status == "待登录":
                 account.status = "已缓存"
-            if account_cache_repairs:
+            if account_cache_repairs or extracted_code_cache:
                 self.storage.save_mail_cache(account)
         if repaired_accounts:
             self._save_accounts_state()
@@ -117,6 +122,15 @@ class MailManager:
                 "batch",
                 "修复邮件文件夹缓存",
                 {"count": repaired_mail_cache},
+            )
+        if extracted_code_cache:
+            self.log_event(
+                "info",
+                "verification",
+                "extract_cache",
+                "batch",
+                "提取缓存邮件验证码",
+                {"count": extracted_code_cache},
             )
         self.rebuild_mail_pool()
         self._start_workers()
@@ -580,7 +594,19 @@ class MailManager:
             "has_body": bool(item.body_text),
             "body_text": item.body_text,
             "body_html": item.body_html,
+            "verification_codes": item.verification_codes,
         }
+
+    def refresh_verification_codes(self, item: MailItem) -> bool:
+        codes = extract_verification_codes(
+            subject=item.subject,
+            from_text=item.from_text,
+            body_text=item.body_text,
+        )
+        if codes != item.verification_codes:
+            item.verification_codes = codes
+            return True
+        return False
 
     def dashboard_state(self) -> dict:
         with self.lock:
@@ -1479,6 +1505,7 @@ class MailManager:
                 account.mails = mails
                 account.last_check = format_shanghai_time(self._now_shanghai())
                 new_items = [item for item in mails if item.local_key not in existing_keys]
+                codes_changed = any(self.refresh_verification_codes(item) for item in mails)
                 if "成功" in message:
                     account.status = "登录成功"
                     account.last_error = ""
@@ -1489,6 +1516,8 @@ class MailManager:
                     account.last_error = message
                     self.log_event("error", "mail_fetch", "receive_failed", account.email, "收件失败", {"error": message})
                 self.storage.save_mail_cache(account)
+                if codes_changed:
+                    self.log_event("info", "verification", "extract_headers", account.email, "验证码标题提取完成")
                 self._save_accounts_state()
                 self.rebuild_mail_pool()
                 self.receive_done += 1
@@ -1528,6 +1557,7 @@ class MailManager:
                 task.status = status
                 if status == "OK":
                     item.body_text = body
+                    self.refresh_verification_codes(item)
                     task.state = "done"
                     task.downloaded = size
                     task.total = size

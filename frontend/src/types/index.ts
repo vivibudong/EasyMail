@@ -70,6 +70,16 @@ export interface MailItem {
   has_body: boolean
   body_text: string
   body_html: string
+  verification_codes: VerificationCode[]
+}
+
+export interface VerificationCode {
+  code: string
+  confidence: number
+  source: string
+  matched_rule: string
+  context: string
+  from: string
 }
 
 export interface BodyTask {

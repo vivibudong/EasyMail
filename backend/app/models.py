@@ -25,6 +25,7 @@ class MailItem:
     is_starred: bool = False
     body_text: str = ""
     body_html: str = ""
+    verification_codes: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -129,6 +130,7 @@ def mail_item_to_dict(m: MailItem) -> dict:
         "is_starred": m.is_starred,
         "body_text": m.body_text,
         "body_html": m.body_html,
+        "verification_codes": m.verification_codes,
     }
 
 
@@ -157,6 +159,7 @@ def mail_item_from_dict(data: dict) -> Optional[MailItem]:
             is_starred=bool(data.get("is_starred", False)),
             body_text=str(data.get("body_text", "")),
             body_html=str(data.get("body_html", "")),
+            verification_codes=[item for item in data.get("verification_codes", []) if isinstance(item, dict)],
         )
     except Exception:
         return None

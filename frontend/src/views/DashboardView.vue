@@ -44,7 +44,7 @@
         </div>
 
         <div class="card-body flex-1 overflow-x-auto overflow-y-hidden p-0">
-          <div class="mail-workbench">
+          <div class="mail-workbench" :style="{ '--taxonomy-width': `${taxonomyPaneWidth}px` }">
             <aside class="mail-pane border-r border-gray-100 dark:border-dark-800">
               <div class="pane-scroll space-y-3 py-2">
                 <div>
@@ -75,7 +75,8 @@
                         class="inline-block h-2 w-2 flex-shrink-0 rounded-full"
                         :style="{ backgroundColor: group.color || '#D6EAF8' }"
                       ></span>
-                      <span class="truncate">{{ group.label }}({{ group.accountCount }})</span>
+                      <span class="min-w-0 flex-1 truncate">{{ group.label }}</span>
+                      <span class="flex-shrink-0 text-[10px] opacity-70">({{ group.accountCount }})</span>
                     </button>
                   </div>
                 </div>
@@ -102,7 +103,7 @@
                       @click="selectTag('')"
                     >
                       <span class="inline-block h-2 w-2 flex-shrink-0 rounded-full bg-gray-300"></span>
-                      <span class="truncate">全部标签</span>
+                      <span class="min-w-0 flex-1 truncate">全部标签</span>
                     </button>
                     <button
                       v-for="tag in tagOptions"
@@ -120,11 +121,13 @@
                         class="inline-block h-2 w-2 flex-shrink-0 rounded-full"
                         :style="{ backgroundColor: tag.color || '#BFDBFE' }"
                       ></span>
-                      <span class="truncate">{{ tag.label }}({{ tag.accountCount }})</span>
+                      <span class="min-w-0 flex-1 truncate">{{ tag.label }}</span>
+                      <span class="flex-shrink-0 text-[10px] opacity-70">({{ tag.accountCount }})</span>
                     </button>
                   </div>
                 </div>
               </div>
+              <div class="pane-resizer" title="拖拽调整分组栏宽度" @mousedown.prevent="startTaxonomyResize"></div>
             </aside>
 
             <aside class="mail-pane border-r border-gray-100 dark:border-dark-800">
@@ -313,6 +316,19 @@
                           <span>|</span>
                           <span>{{ mail.date_text }}</span>
                         </div>
+                        <div
+                          v-if="mail.verification_codes?.length"
+                          class="mt-1 flex flex-wrap items-center gap-1"
+                        >
+                          <button
+                            v-for="code in mail.verification_codes.slice(0, 2)"
+                            :key="`${mail.local_key}-${code.code}`"
+                            class="rounded-full bg-cyan-50 px-2 py-0.5 text-[10px] font-semibold text-cyan-700 hover:bg-cyan-100 dark:bg-cyan-900/20 dark:text-cyan-300"
+                            @click.stop="copyVerificationCode(code.code)"
+                          >
+                            验证码 {{ code.code }}
+                          </button>
+                        </div>
                       </div>
                       <span
                         v-if="mail.is_unread"
@@ -397,6 +413,21 @@
               </div>
 
               <div class="px-4 pb-2">
+                <div
+                  v-if="selectedMailDetail?.verification_codes?.length"
+                  class="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-cyan-100 bg-cyan-50/70 px-3 py-2 text-xs text-cyan-800 dark:border-cyan-900/50 dark:bg-cyan-900/10 dark:text-cyan-200"
+                >
+                  <span class="font-semibold">提取验证码</span>
+                  <button
+                    v-for="code in selectedMailDetail.verification_codes"
+                    :key="`${selectedMailDetail.local_key}-${code.code}`"
+                    class="rounded-lg bg-white px-2 py-1 font-mono font-semibold text-cyan-700 shadow-sm hover:bg-cyan-100 dark:bg-dark-800 dark:text-cyan-300"
+                    :title="`置信度 ${Math.round(code.confidence * 100)}% · ${code.source}`"
+                    @click="copyVerificationCode(code.code)"
+                  >
+                    {{ code.code }}
+                  </button>
+                </div>
                 <div class="mb-1.5 text-[11px] text-gray-500 dark:text-dark-400">
                   {{ bodyStatusText }}
                 </div>
@@ -1085,6 +1116,7 @@ const translatingBody = ref(false)
 const showingRawBody = ref(false)
 const loadingRawBody = ref(false)
 const allowRemoteImages = ref(false)
+const taxonomyPaneWidth = ref(142)
 const checkedAccounts = ref<string[]>([])
 const fileInput = ref<HTMLInputElement | null>(null)
 const restoreBackupInput = ref<HTMLInputElement | null>(null)
@@ -1232,6 +1264,7 @@ let accountResizeObserver: ResizeObserver | null = null
 let mailResizeObserver: ResizeObserver | null = null
 let handleWindowResize: (() => void) | null = null
 let pageSizingFrame: number | null = null
+let taxonomyResizeCleanup: (() => void) | null = null
 
 const allAccounts = computed(() => dashboard.value?.accounts || [])
 const allMails = computed(() => dashboard.value?.mails || [])
@@ -1588,6 +1621,8 @@ watch(
 )
 
 onMounted(async () => {
+  const storedTaxonomyWidth = Number(localStorage.getItem('easymail-taxonomy-width') || '142')
+  taxonomyPaneWidth.value = Math.min(240, Math.max(118, storedTaxonomyWidth || 142))
   await refreshState()
   refreshTimer = window.setInterval(() => {
     refreshState(true)
@@ -1608,6 +1643,7 @@ onBeforeUnmount(() => {
   if (handleWindowResize) {
     window.removeEventListener('resize', handleWindowResize)
   }
+  taxonomyResizeCleanup?.()
 })
 
 function computePageSize(containerHeight: number, rowHeight: number, minimum = 4) {
@@ -1693,6 +1729,25 @@ function showSuccess(message: string) {
 
 function showError(message: string) {
   toastStore.push(message, 'error')
+}
+
+function startTaxonomyResize(event: MouseEvent) {
+  const startX = event.clientX
+  const startWidth = taxonomyPaneWidth.value
+  taxonomyResizeCleanup?.()
+
+  const handleMove = (moveEvent: MouseEvent) => {
+    taxonomyPaneWidth.value = Math.min(240, Math.max(118, startWidth + moveEvent.clientX - startX))
+  }
+  const handleUp = () => {
+    localStorage.setItem('easymail-taxonomy-width', String(Math.round(taxonomyPaneWidth.value)))
+    window.removeEventListener('mousemove', handleMove)
+    window.removeEventListener('mouseup', handleUp)
+    taxonomyResizeCleanup = null
+  }
+  taxonomyResizeCleanup = handleUp
+  window.addEventListener('mousemove', handleMove)
+  window.addEventListener('mouseup', handleUp)
 }
 
 function openConfirmDialog(title: string, message: string, action: () => Promise<void> | void) {
@@ -2497,12 +2552,20 @@ async function handleDeleteTag() {
 
 async function copyEmail(email: string) {
   closeContextMenu()
+  await copyText(email, `已复制: ${email}`)
+}
+
+async function copyVerificationCode(code: string) {
+  await copyText(code, `验证码已复制: ${code}`)
+}
+
+async function copyText(value: string, successMessage: string) {
   try {
     if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(email)
+      await navigator.clipboard.writeText(value)
     } else {
       const textarea = document.createElement('textarea')
-      textarea.value = email
+      textarea.value = value
       textarea.setAttribute('readonly', 'true')
       textarea.style.position = 'fixed'
       textarea.style.opacity = '0'
@@ -2511,11 +2574,11 @@ async function copyEmail(email: string) {
       document.execCommand('copy')
       document.body.removeChild(textarea)
     }
-    showSuccess(`已复制: ${email}`)
+    showSuccess(successMessage)
   } catch {
     try {
       const textarea = document.createElement('textarea')
-      textarea.value = email
+      textarea.value = value
       textarea.setAttribute('readonly', 'true')
       textarea.style.position = 'fixed'
       textarea.style.opacity = '0'
@@ -2524,7 +2587,7 @@ async function copyEmail(email: string) {
       const copied = document.execCommand('copy')
       document.body.removeChild(textarea)
       if (copied) {
-        showSuccess(`已复制: ${email}`)
+        showSuccess(successMessage)
         return
       }
     } catch {

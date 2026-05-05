@@ -728,11 +728,16 @@
 
   /* ============ Mail Workbench ============ */
   .mail-workbench {
-    @apply grid h-full min-h-0 min-w-[1180px] grid-cols-[124px_292px_352px_minmax(320px,1fr)];
+    @apply grid h-full min-h-0 min-w-[1180px];
+    grid-template-columns: var(--taxonomy-width, 142px) 292px 352px minmax(320px, 1fr);
   }
 
   .mail-pane {
-    @apply flex min-h-0 flex-col bg-white/50 dark:bg-dark-900/20;
+    @apply relative flex min-h-0 flex-col bg-white/50 dark:bg-dark-900/20;
+  }
+
+  .pane-resizer {
+    @apply absolute right-[-3px] top-0 z-20 h-full w-1.5 cursor-col-resize bg-transparent transition-colors hover:bg-primary-300/50;
   }
 
   .pane-toolbar {
