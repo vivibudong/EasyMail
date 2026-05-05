@@ -344,6 +344,41 @@ export async function restoreAccountBackup(file: File) {
   return data
 }
 
+export interface ApiTokenItem {
+  id: string
+  name: string
+  scopes: string[]
+  enabled: boolean
+  created_at: string
+  last_used_at: string
+  last_used_ip: string
+}
+
+export async function getApiTokens() {
+  const { data } = await apiClient.get<
+    ApiResponse<{
+      items: ApiTokenItem[]
+      available_scopes: string[]
+    }>
+  >('/api-tokens')
+  return data
+}
+
+export async function createApiToken(payload: { name: string; scopes: string[] }) {
+  const { data } = await apiClient.post<
+    ApiResponse<{
+      token: string
+      item: ApiTokenItem
+    }>
+  >('/api-tokens', payload)
+  return data
+}
+
+export async function disableApiToken(tokenId: string) {
+  const { data } = await apiClient.post<ApiResponse<Record<string, never>>>(`/api-tokens/${tokenId}/disable`)
+  return data
+}
+
 export async function getLogs(options?: {
   category?: string
   level?: string

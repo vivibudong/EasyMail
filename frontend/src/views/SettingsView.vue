@@ -353,6 +353,111 @@
           </div>
         </section>
 
+        <section v-if="currentSection === 'security'" class="card">
+          <div class="card-header">
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">API Token</h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
+              为外部系统创建 API Key。完整密钥只会在创建后显示一次，请立即复制保存。
+            </p>
+          </div>
+
+          <div class="card-body space-y-5">
+            <div
+              v-if="createdApiToken"
+              class="rounded-2xl border border-cyan-200 bg-cyan-50 p-4 text-sm text-cyan-800 dark:border-cyan-900/50 dark:bg-cyan-900/20 dark:text-cyan-200"
+            >
+              <div class="font-semibold">新的 API Key 已生成，只显示一次</div>
+              <div class="mt-3 flex gap-2">
+                <input class="input font-mono text-xs" :value="createdApiToken" readonly />
+                <button class="btn btn-secondary" @click="copyApiToken">复制</button>
+              </div>
+            </div>
+
+            <div class="grid gap-4 md:grid-cols-[260px_minmax(0,1fr)]">
+              <label class="space-y-2">
+                <span class="input-label mb-0">Token 名称</span>
+                <input v-model.trim="apiTokenForm.name" class="input" type="text" placeholder="例如：外部查码服务" />
+              </label>
+              <div class="space-y-2">
+                <span class="input-label mb-0">权限范围</span>
+                <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                  <label
+                    v-for="scope in availableApiScopes"
+                    :key="scope"
+                    class="flex items-start gap-2 rounded-xl border border-gray-200 px-3 py-2 text-xs text-gray-700 dark:border-dark-700 dark:text-dark-200"
+                  >
+                    <input v-model="apiTokenForm.scopes" :value="scope" type="checkbox" />
+                    <span>
+                      <span class="block font-mono">{{ scope }}</span>
+                      <span class="mt-0.5 block text-gray-500 dark:text-dark-400">{{ apiScopeLabels[scope] || 'API 权限' }}</span>
+                    </span>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <button class="btn btn-primary" :disabled="creatingApiToken" @click="handleCreateApiToken">
+              {{ creatingApiToken ? '创建中...' : '创建 API Key' }}
+            </button>
+
+            <div class="overflow-x-auto rounded-2xl border border-gray-100 dark:border-dark-700">
+              <table class="min-w-full text-left text-sm">
+                <thead class="bg-gray-50 text-xs text-gray-500 dark:bg-dark-800 dark:text-dark-400">
+                  <tr>
+                    <th class="px-4 py-3">名称</th>
+                    <th class="px-4 py-3">权限</th>
+                    <th class="px-4 py-3">状态</th>
+                    <th class="px-4 py-3">最后使用</th>
+                    <th class="px-4 py-3">操作</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100 dark:divide-dark-700">
+                  <tr v-for="item in apiTokens" :key="item.id">
+                    <td class="px-4 py-3 font-medium text-gray-900 dark:text-white">{{ item.name }}</td>
+                    <td class="max-w-md px-4 py-3">
+                      <div class="flex flex-wrap gap-1">
+                        <span
+                          v-for="scope in item.scopes"
+                          :key="scope"
+                          class="rounded-full bg-gray-100 px-2 py-0.5 font-mono text-[10px] text-gray-600 dark:bg-dark-700 dark:text-dark-300"
+                        >
+                          {{ scope }}
+                        </span>
+                      </div>
+                    </td>
+                    <td class="px-4 py-3">
+                      <span
+                        class="rounded-full px-2 py-0.5 text-xs"
+                        :class="item.enabled ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-300' : 'bg-gray-100 text-gray-500 dark:bg-dark-700 dark:text-dark-400'"
+                      >
+                        {{ item.enabled ? '启用' : '已禁用' }}
+                      </span>
+                    </td>
+                    <td class="px-4 py-3 text-xs text-gray-500 dark:text-dark-400">
+                      {{ item.last_used_at || '从未使用' }}
+                      <span v-if="item.last_used_ip"> / {{ item.last_used_ip }}</span>
+                    </td>
+                    <td class="px-4 py-3">
+                      <button
+                        class="btn btn-danger btn-sm"
+                        :disabled="!item.enabled || disablingApiTokenId === item.id"
+                        @click="handleDisableApiToken(item.id)"
+                      >
+                        {{ disablingApiTokenId === item.id ? '禁用中...' : '禁用' }}
+                      </button>
+                    </td>
+                  </tr>
+                  <tr v-if="!apiTokens.length">
+                    <td class="px-4 py-6 text-center text-sm text-gray-500 dark:text-dark-400" colspan="5">
+                      暂无 API Token
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
         <section class="card p-6">
           <div class="flex flex-wrap items-center gap-3">
             <button class="btn btn-primary" :disabled="saving" @click="handleSave">
@@ -373,6 +478,9 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { updateAdminCredentials } from '@/api/auth'
 import {
+  createApiToken,
+  disableApiToken,
+  getApiTokens,
   getSettings,
   getTokenRefreshHistory,
   restoreAccountBackup,
@@ -380,6 +488,7 @@ import {
   runTokenRefresh,
   saveSettings,
   sendTestNotification,
+  type ApiTokenItem,
 } from '@/api/dashboard'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -445,6 +554,27 @@ const tokenRefreshHistory = ref<
     payload: Record<string, any>
   }>
 >([])
+const apiTokens = ref<ApiTokenItem[]>([])
+const availableApiScopes = ref<string[]>([])
+const createdApiToken = ref('')
+const creatingApiToken = ref(false)
+const disablingApiTokenId = ref('')
+const apiTokenForm = reactive({
+  name: '',
+  scopes: ['read:accounts', 'read:mails'],
+})
+const apiScopeLabels: Record<string, string> = {
+  'read:accounts': '查询邮箱、分组、标签、队列、版本',
+  'read:mails': '查询邮件、详情和验证码',
+  'write:accounts': '导入账号',
+  'write:taxonomy': '管理分组、标签和旗标',
+  'task:receive': '执行收件任务',
+  'task:login': '执行重新登录任务',
+  'task:backup': '执行备份',
+  'notify:send': '发送手动通知',
+  'read:logs': '查询日志',
+  'admin:tokens': '预留管理权限',
+}
 
 const currentSection = computed(() => {
   const section = String(route.query.section || 'import')
@@ -469,6 +599,7 @@ onMounted(async () => {
   Object.assign(form, response.data)
   securityForm.email = authStore.user?.email || ''
   await loadTokenRefreshHistory()
+  await loadApiTokens()
 })
 
 watch(
@@ -567,6 +698,62 @@ async function handleSaveSecurity() {
   } finally {
     savingSecurity.value = false
   }
+}
+
+async function loadApiTokens() {
+  try {
+    const response = await getApiTokens()
+    apiTokens.value = response.data.items
+    availableApiScopes.value = response.data.available_scopes.filter((scope) => scope !== 'admin:tokens')
+  } catch (error: any) {
+    toastStore.push(error?.response?.data?.detail || '加载 API Token 失败', 'error')
+  }
+}
+
+async function handleCreateApiToken() {
+  if (!apiTokenForm.name.trim()) {
+    toastStore.push('请输入 Token 名称', 'error')
+    return
+  }
+  if (!apiTokenForm.scopes.length) {
+    toastStore.push('请至少选择一个权限', 'error')
+    return
+  }
+  creatingApiToken.value = true
+  try {
+    const response = await createApiToken({
+      name: apiTokenForm.name.trim(),
+      scopes: apiTokenForm.scopes,
+    })
+    createdApiToken.value = response.data.token
+    apiTokenForm.name = ''
+    apiTokenForm.scopes = ['read:accounts', 'read:mails']
+    await loadApiTokens()
+    toastStore.push(response.message, 'success')
+  } catch (error: any) {
+    toastStore.push(error?.response?.data?.detail || '创建 API Key 失败', 'error')
+  } finally {
+    creatingApiToken.value = false
+  }
+}
+
+async function handleDisableApiToken(tokenId: string) {
+  disablingApiTokenId.value = tokenId
+  try {
+    const response = await disableApiToken(tokenId)
+    toastStore.push(response.message, 'success')
+    await loadApiTokens()
+  } catch (error: any) {
+    toastStore.push(error?.response?.data?.detail || '禁用 API Token 失败', 'error')
+  } finally {
+    disablingApiTokenId.value = ''
+  }
+}
+
+async function copyApiToken() {
+  if (!createdApiToken.value) return
+  await navigator.clipboard.writeText(createdApiToken.value)
+  toastStore.push('API Key 已复制', 'success')
 }
 
 async function handleTestNotification() {
