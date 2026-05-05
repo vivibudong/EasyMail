@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 import base64
 import hashlib
@@ -340,6 +341,56 @@ def _paginate(items: list, page: int, page_size: int) -> dict:
         "page": page,
         "page_size": page_size,
     }
+
+
+def _filter_code_mails(
+    account: str = "",
+    keyword: str = "",
+    date_from: str = "",
+    date_to: str = "",
+) -> list[MailItem]:
+    mails = [item for item in manager.all_mails if item.verification_codes]
+    if account:
+        normalized = account.strip().lower()
+        mails = [item for item in mails if item.account_email.lower() == normalized]
+    if keyword:
+        query = keyword.lower()
+        mails = [
+            item for item in mails
+            if query in item.subject.lower()
+            or query in item.from_text.lower()
+            or query in item.account_email.lower()
+        ]
+    if date_from:
+        try:
+            start_dt = dt.datetime.fromisoformat(date_from)
+            mails = [item for item in mails if item.date_value >= start_dt]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date_from 格式无效")
+    if date_to:
+        try:
+            end_dt = dt.datetime.fromisoformat(date_to)
+            mails = [item for item in mails if item.date_value <= end_dt]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date_to 格式无效")
+    return mails
+
+
+def _serialize_code_items(mails: list[MailItem], limit: int) -> list[dict]:
+    items = []
+    for mail in mails:
+        for code in mail.verification_codes:
+            items.append(
+                {
+                    **code,
+                    "account_email": mail.account_email,
+                    "subject": mail.subject,
+                    "from_text": mail.from_text,
+                    "received_at": mail.date_value.isoformat(),
+                    "mail_key": mail.local_key,
+                }
+            )
+    return items[:limit]
 
 
 def _request_id(request: Request) -> str:
@@ -1578,14 +1629,34 @@ def api_v1_mail_detail(
     request: Request,
     local_key: str,
     include_body: bool = Query(default=True),
+    wait_seconds: int = Query(default=8, ge=0, le=30),
     api_user: dict = Depends(require_api_scope("read:mails")),
 ) -> dict:
+    body_status = None
+    if include_body:
+        try:
+            body_status = manager.ensure_body_download(local_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        deadline = time.time() + wait_seconds
+        while wait_seconds > 0:
+            with manager.lock:
+                item = manager.mail_items.get(local_key)
+                task = manager.body_tasks.get(local_key)
+                if item and item.body_text:
+                    break
+                if task and task.state == "error":
+                    break
+            if time.time() >= deadline:
+                break
+            time.sleep(0.5)
     with manager.lock:
         item = manager.mail_items.get(local_key)
         if not item:
             raise HTTPException(status_code=404, detail="邮件不存在")
         data = _safe_mail(item, include_body=include_body)
-    return api_ok("ok", {"mail": data}, _request_id(request))
+        body_status = manager.get_body_status(local_key) if include_body else body_status
+    return api_ok("ok", {"mail": data, "body_task": body_status.get("body_task") if body_status else None}, _request_id(request))
 
 
 @app.get("/api/v1/mails/{local_key}/codes")
@@ -1610,42 +1681,31 @@ def api_v1_codes(
     date_from: str = Query(default=""),
     date_to: str = Query(default=""),
     limit: int = Query(default=20, ge=1, le=200),
+    wait_seconds: int = Query(default=8, ge=0, le=30),
+    ensure_body: bool = Query(default=True),
     api_user: dict = Depends(require_api_scope("read:mails")),
 ) -> dict:
-    with manager.lock:
-        mails = [item for item in manager.all_mails if item.verification_codes]
-        if account:
-            mails = [item for item in mails if item.account_email == account]
-        if keyword:
-            query = keyword.lower()
-            mails = [item for item in mails if query in item.subject.lower() or query in item.from_text.lower() or query in item.account_email.lower()]
-        if date_from:
-            try:
-                start_dt = dt.datetime.fromisoformat(date_from)
-                mails = [item for item in mails if item.date_value >= start_dt]
-            except ValueError:
-                raise HTTPException(status_code=400, detail="date_from 格式无效")
-        if date_to:
-            try:
-                end_dt = dt.datetime.fromisoformat(date_to)
-                mails = [item for item in mails if item.date_value <= end_dt]
-            except ValueError:
-                raise HTTPException(status_code=400, detail="date_to 格式无效")
-        items = []
-        for mail in mails:
-            for code in mail.verification_codes:
-                items.append(
-                    {
-                        **code,
-                        "account_email": mail.account_email,
-                        "subject": mail.subject,
-                        "from_text": mail.from_text,
-                        "received_at": mail.date_value.isoformat(),
-                        "mail_key": mail.local_key,
-                    }
-                )
-        items = items[:limit]
-    return api_ok("ok", {"items": items}, _request_id(request))
+    ensure_state = {"checked": 0, "queued": 0, "pending_body_keys": []}
+    deadline = time.time() + wait_seconds
+    while True:
+        if ensure_body:
+            ensure_state = manager.ensure_code_candidate_bodies(account, max(limit, 20))
+        with manager.lock:
+            mails = _filter_code_mails(account, keyword, date_from, date_to)
+            items = _serialize_code_items(mails, limit)
+            pending_count = len(ensure_state.get("pending_body_keys", []))
+        if not ensure_body or wait_seconds <= 0 or time.time() >= deadline or pending_count == 0:
+            break
+        time.sleep(0.5)
+    return api_ok(
+        "ok",
+        {
+            "items": items,
+            "body_check": ensure_state,
+            "waited": max(0, round(wait_seconds - max(0, deadline - time.time()), 2)),
+        },
+        _request_id(request),
+    )
 
 
 @app.get("/api/v1/groups")

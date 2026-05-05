@@ -44,6 +44,12 @@ from .storage import SqliteStorage
 
 
 class MailManager:
+    VERIFICATION_MAIL_PATTERN = re.compile(
+        r"验证码|校验码|验证|临时.*码|temporary|verification|verify|login\s*code|"
+        r"one[-\s]*time|passcode|security\s*code|auth(?:entication)?\s*code|otp|openai|chatgpt",
+        re.IGNORECASE,
+    )
+
     def __init__(self, storage: SqliteStorage) -> None:
         self.storage = storage
         self.lock = threading.RLock()
@@ -611,6 +617,62 @@ class MailManager:
             item.verification_codes = codes
             return True
         return False
+
+    def looks_like_verification_mail(self, item: MailItem) -> bool:
+        if item.verification_codes:
+            return True
+        text = "\n".join([item.subject or "", item.from_text or ""])
+        return bool(self.VERIFICATION_MAIL_PATTERN.search(text))
+
+    def ensure_body_download(self, local_key: str) -> dict:
+        with self.lock:
+            item = self.mail_items.get(local_key)
+            if not item:
+                raise ValueError("邮件不存在")
+            task = self.body_tasks.get(local_key)
+            if item.body_text:
+                size = len(item.body_text.encode("utf-8", errors="ignore"))
+                task = self.body_tasks[local_key] = BodyTask(
+                    state="done",
+                    downloaded=size,
+                    total=size,
+                    status="正文已缓存",
+                    size=size,
+                )
+            elif not task or task.state not in {"queued", "downloading"}:
+                account = self.find_account(item.account_email)
+                if account:
+                    task = self.enqueue_body(account, item)
+            return {"mail": self.serialize_mail(item), "body_task": asdict(task or BodyTask())}
+
+    def ensure_code_candidate_bodies(self, account_email: str = "", limit: int = 20) -> dict:
+        with self.lock:
+            normalized = account_email.strip().lower()
+            candidates = [
+                item for item in self.all_mails
+                if (not normalized or item.account_email.lower() == normalized)
+                and self.looks_like_verification_mail(item)
+            ][:max(1, min(50, limit))]
+            queued = 0
+            pending: list[str] = []
+            for item in candidates:
+                if item.body_text:
+                    continue
+                task = self.body_tasks.get(item.local_key)
+                if task and task.state in {"queued", "downloading"}:
+                    pending.append(item.local_key)
+                    continue
+                account = self.find_account(item.account_email)
+                if not account:
+                    continue
+                self.enqueue_body(account, item)
+                queued += 1
+                pending.append(item.local_key)
+            return {
+                "checked": len(candidates),
+                "queued": queued,
+                "pending_body_keys": pending,
+            }
 
     def dashboard_state(self) -> dict:
         with self.lock:
@@ -1618,7 +1680,12 @@ class MailManager:
                 account.last_check = format_shanghai_time(self._now_shanghai())
                 new_items = [item for item in mails if item.local_key not in existing_keys]
                 codes_changed = any(self.refresh_verification_codes(item) for item in mails)
+                auto_body_queued = 0
                 if "成功" in message:
+                    for item in new_items:
+                        if not item.body_text:
+                            self.enqueue_body(account, item)
+                            auto_body_queued += 1
                     account.status = "登录成功"
                     account.last_error = ""
                     self._queue_mail_notifications(account, new_items)
@@ -1630,6 +1697,8 @@ class MailManager:
                 self.storage.save_mail_cache(account)
                 if codes_changed:
                     self.log_event("info", "verification", "extract_headers", account.email, "验证码标题提取完成")
+                if auto_body_queued:
+                    self.log_event("info", "mail_body", "auto_body_queue", account.email, "新邮件正文已自动排队", {"queued": auto_body_queued})
                 self._save_accounts_state()
                 self.rebuild_mail_pool()
                 self.receive_done += 1
@@ -1669,13 +1738,15 @@ class MailManager:
                 task.status = status
                 if status == "OK":
                     item.body_text = body
-                    self.refresh_verification_codes(item)
+                    codes_changed = self.refresh_verification_codes(item)
                     task.state = "done"
                     task.downloaded = size
                     task.total = size
                     task.status = "正文已缓存"
                     self.storage.save_mail_cache(account)
                     self.log_event("info", "mail_body", "load_success", item.local_key, "邮件正文加载成功", {"source": item.source, "size": size})
+                    if codes_changed and item.verification_codes:
+                        self.log_event("info", "verification", "extract_body", item.local_key, "验证码正文提取完成", {"codes": len(item.verification_codes)})
                 else:
                     task.state = "error"
                     self.log_event("error", "mail_body", "load_failed", item.local_key, "邮件正文加载失败", {"error": status, "source": item.source})
