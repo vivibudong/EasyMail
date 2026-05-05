@@ -298,7 +298,7 @@
           </div>
         </section>
 
-        <section v-else class="card">
+        <section v-else-if="currentSection === 'security'" class="card">
           <div class="card-header">
             <h2 class="text-lg font-semibold text-gray-900 dark:text-white">安全</h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
@@ -353,7 +353,7 @@
           </div>
         </section>
 
-        <section v-if="currentSection === 'security'" class="card">
+        <section v-else-if="currentSection === 'api'" class="card">
           <div class="card-header">
             <h2 class="text-lg font-semibold text-gray-900 dark:text-white">API Token</h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
@@ -505,6 +505,7 @@ const sections = [
   { key: 'refresh', label: '邮箱刷新' },
   { key: 'backup', label: '备份' },
   { key: 'security', label: '安全' },
+  { key: 'api', label: 'API' },
 ]
 
 const form = reactive<AppSettings>({
