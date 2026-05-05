@@ -372,7 +372,7 @@
                   <div class="truncate text-[11px] text-gray-500 dark:text-dark-400">
                     {{
                       selectedMailDetail
-                        ? `${selectedMailDetail.folder} | ${selectedMailDetail.from_text} | ${selectedMailDetail.account_email} | ${selectedMailDetail.date_text}`
+                        ? compactMailMeta(selectedMailDetail)
                         : '等待选择邮件'
                     }}
                   </div>
@@ -1429,6 +1429,24 @@ const groupedMails = computed(() => {
 
   return groups.filter((group) => group.items.length > 0)
 })
+
+function extractEmailAddress(value: string) {
+  const angleMatch = value.match(/<([^<>@\s]+@[^<>\s]+)>/)
+  if (angleMatch) return angleMatch[1]
+  const plainMatch = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
+  return plainMatch?.[0] || value
+}
+
+function formatCompactDate(value: string, fallback = '') {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return fallback
+  const pad = (num: number) => String(num).padStart(2, '0')
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())} - ${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()}`
+}
+
+function compactMailMeta(mail: MailItem) {
+  return `${mail.folder} | ${extractEmailAddress(mail.from_text)} | ${formatCompactDate(mail.date_value, mail.date_text)}`
+}
 
 const nonSuccessAccounts = computed<AccountIssue[]>(() =>
   allAccounts.value

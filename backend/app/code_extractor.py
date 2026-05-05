@@ -55,6 +55,10 @@ def _mask_context(text: str, start: int, end: int, radius: int = 60) -> str:
 
 def _looks_like_noise(code: str, context: str) -> bool:
     lowered = context.lower()
+    if re.fullmatch(r"\d{6}[A-Z]{1,2}", code) and any(word in lowered for word in ("openai", "chatgpt")):
+        return True
+    if re.fullmatch(r"[A-Z]{4,8}", code):
+        return True
     if len(code) >= 9:
         return True
     if re.fullmatch(r"20\d{2}", code):
@@ -94,6 +98,10 @@ def extract_verification_codes(subject: str = "", from_text: str = "", body_text
         ("body", _normalize_text(body_text)),
     ]
     candidates: list[CodeCandidate] = []
+    openai_pattern = re.compile(
+        r"(?:openai|chatgpt|temporary\s+chatgpt\s+login\s+code)[^0-9]{0,80}(\d{6})(?=[A-Za-z\s.,:;!?<]|$)",
+        re.IGNORECASE,
+    )
     keyword_pattern = re.compile(
         r"(验证码|校验码|动态码|安全码|验证代码|一次性代码|verification code|security code|passcode|otp|code)"
         r"[^A-Za-z0-9]{0,24}"
@@ -105,6 +113,20 @@ def extract_verification_codes(subject: str = "", from_text: str = "", body_text
     for source, text in fields:
         if not text:
             continue
+        for match in openai_pattern.finditer(text):
+            code = match.group(1).strip()
+            context = _mask_context(text, match.start(), match.end())
+            if _looks_like_noise(code, context):
+                continue
+            candidates.append(
+                CodeCandidate(
+                    code=code,
+                    confidence=0.99,
+                    source=source,
+                    matched_rule="openai_login_code",
+                    context=context,
+                )
+            )
         for match in keyword_pattern.finditer(text):
             code = match.group(2).strip().upper()
             context = _mask_context(text, match.start(), match.end())
