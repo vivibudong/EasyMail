@@ -252,6 +252,9 @@ def _version_payload(force: bool = False) -> dict:
             "published_at": str(release.get("published_at") or ""),
             "html_url": str(release.get("html_url") or PROJECT_RELEASES_URL),
         }
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            warning = str(exc)
     except Exception as exc:
         warning = str(exc)
     payload = {

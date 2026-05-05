@@ -1,12 +1,15 @@
 <template>
   <div ref="rootRef" class="relative">
     <button
-      class="inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs font-semibold shadow-sm transition-colors"
+      class="inline-flex h-8 items-center gap-1.5 rounded-lg border px-2 text-left shadow-sm transition-colors"
       :class="badgeClass"
       @click.stop="dropdownOpen = !dropdownOpen"
     >
       <span class="h-1.5 w-1.5 rounded-full" :class="dotClass" />
-      <span>v{{ versionInfo?.current_version || '0.1.0' }}</span>
+      <span class="leading-[0.85rem]">
+        <span class="block text-[9px] font-semibold uppercase tracking-[0.12em] opacity-75">EasyMail</span>
+        <span class="block text-[11px] font-semibold">v{{ versionInfo?.current_version || '0.1.0' }}</span>
+      </span>
       <span v-if="checking" class="text-[10px] opacity-70">检查中</span>
     </button>
 
