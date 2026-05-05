@@ -8,6 +8,7 @@
         >
           <img src="/logo.svg" alt="EasyMail" class="h-full w-full object-contain" />
         </RouterLink>
+        <VersionBadge />
         <div>
           <h1 class="text-base font-semibold text-gray-900 dark:text-white">{{ title }}</h1>
           <p v-if="description" class="text-xs text-gray-500 dark:text-dark-400">
@@ -205,6 +206,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import Icon from '@/components/common/Icon.vue'
+import VersionBadge from '@/components/common/VersionBadge.vue'
 import { siteConfig } from '@/config'
 import { toggleTheme } from '@/lib/theme'
 import { useAuthStore } from '@/stores/auth'

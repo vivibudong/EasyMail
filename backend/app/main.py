@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import base64
 import hashlib
+import os
 import re
 import secrets
+import subprocess
 import string
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -30,9 +33,12 @@ from .storage import SqliteStorage
 GRAPH_REAUTH_SCOPE = "offline_access openid profile https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read"
 MANUAL_OAUTH_SCOPE = GRAPH_REAUTH_SCOPE
 MICROSOFT_CONSUMERS_BASE_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0"
+PROJECT_REPO = "vivibudong/EasyMail"
+PROJECT_RELEASES_URL = f"https://github.com/{PROJECT_REPO}/releases"
 
 storage = SqliteStorage(config.data_dir)
 manager = MailManager(storage)
+version_cache: dict[str, object] = {"expires_at": 0.0, "payload": None}
 
 if config.generated_credentials:
     print("EasyMail initial admin credentials", flush=True)
@@ -198,6 +204,106 @@ class SettingsRequest(BaseModel):
 
 def ok(message: str, data: Optional[dict] = None) -> dict:
     return {"success": True, "message": message, "data": data or {}}
+
+
+def _normalize_version(value: str) -> str:
+    return str(value or "").strip().lstrip("v") or "0.0.0"
+
+
+def _version_tuple(value: str) -> tuple[int, ...]:
+    parts = re.findall(r"\d+", _normalize_version(value))
+    return tuple(int(part) for part in parts[:4]) or (0,)
+
+
+def _fetch_latest_release() -> dict:
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{PROJECT_REPO}/releases/latest",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "EasyMail"},
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    if not isinstance(payload, dict):
+        raise ValueError("GitHub 返回格式异常")
+    return payload
+
+
+def _version_payload(force: bool = False) -> dict:
+    now = time.time()
+    cached_payload = version_cache.get("payload")
+    if not force and cached_payload and float(version_cache.get("expires_at", 0.0) or 0.0) > now:
+        payload = dict(cached_payload)
+        payload["cached"] = True
+        return payload
+    current_version = _normalize_version(config.app_version)
+    latest_version = current_version
+    release_info = {
+        "name": f"v{current_version}",
+        "body": "",
+        "published_at": "",
+        "html_url": PROJECT_RELEASES_URL,
+    }
+    warning = ""
+    try:
+        release = _fetch_latest_release()
+        latest_version = _normalize_version(str(release.get("tag_name") or current_version))
+        release_info = {
+            "name": str(release.get("name") or f"v{latest_version}"),
+            "body": str(release.get("body") or ""),
+            "published_at": str(release.get("published_at") or ""),
+            "html_url": str(release.get("html_url") or PROJECT_RELEASES_URL),
+        }
+    except Exception as exc:
+        warning = str(exc)
+    payload = {
+        "current_version": current_version,
+        "latest_version": latest_version,
+        "has_update": _version_tuple(latest_version) > _version_tuple(current_version),
+        "release_info": release_info,
+        "cached": False,
+        "warning": warning,
+        "build_type": os.getenv("BUILD_TYPE", "release"),
+    }
+    version_cache["payload"] = payload
+    version_cache["expires_at"] = now + 3600
+    return dict(payload)
+
+
+def _run_update_command() -> dict:
+    compose_file = os.getenv("EASYMAIL_COMPOSE_FILE", "")
+    base_cmd = ["docker", "compose"]
+    if compose_file:
+        base_cmd.extend(["-f", compose_file])
+    commands = [
+        [*base_cmd, "pull"],
+        [*base_cmd, "up", "-d"],
+    ]
+    outputs: list[str] = []
+    for command in commands:
+        completed = subprocess.run(
+            command,
+            cwd=os.getenv("EASYMAIL_COMPOSE_DIR", "/app"),
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        outputs.append((completed.stdout or "") + (completed.stderr or ""))
+        if completed.returncode != 0:
+            raise RuntimeError(f"{' '.join(command)} 执行失败: {outputs[-1].strip()}")
+    return {"output": "\n".join(outputs).strip()}
+
+
+def _schedule_exit(delay: float = 0.8) -> None:
+    def exit_later() -> None:
+        time.sleep(delay)
+        os._exit(0)
+
+    threading.Thread(target=exit_later, daemon=True).start()
+
+
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok", "version": _normalize_version(config.app_version)}
 
 
 def _validate_admin_email(email: str) -> str:
@@ -415,6 +521,52 @@ def resolve_targets(payload: AccountBatchRequest) -> list:
 @app.get("/api/app-config")
 def app_config() -> dict:
     return ok("ok", config.public_settings)
+
+
+@app.get("/api/system/version")
+def system_version(current_user: dict = Depends(get_current_user)) -> dict:
+    return ok(
+        "ok",
+        {
+            "current_version": _normalize_version(config.app_version),
+            "build_type": os.getenv("BUILD_TYPE", "release"),
+        },
+    )
+
+
+@app.get("/api/system/check-updates")
+def check_system_updates(
+    force: bool = Query(False),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    return ok("ok", _version_payload(force=force))
+
+
+@app.post("/api/system/update")
+def update_system(current_user: dict = Depends(get_current_user)) -> dict:
+    try:
+        result = _run_update_command()
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="当前运行环境未安装 Docker CLI，无法在容器内执行在线更新。请在宿主机执行 docker compose pull && docker compose up -d。",
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=400, detail="在线更新超时，请在宿主机检查 Docker 状态。") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"在线更新失败: {exc}") from exc
+
+    version_cache["payload"] = None
+    version_cache["expires_at"] = 0.0
+    manager.log_event("info", "system", "update", current_user["email"], "在线更新完成", result)
+    return ok("更新完成，请点击立即重启", {"need_restart": True, **result})
+
+
+@app.post("/api/system/restart")
+def restart_system(current_user: dict = Depends(get_current_user)) -> dict:
+    manager.log_event("warn", "system", "restart", current_user["email"], "管理员触发服务重启")
+    _schedule_exit()
+    return ok("服务正在重启", {"restarting": True})
 
 
 @app.post("/api/auth/login")

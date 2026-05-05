@@ -83,6 +83,7 @@ class AppConfig:
     app_name: str
     app_subtitle: str
     app_description: str
+    app_version: str
     admin_email: str
     admin_password_hash: str
     jwt_secret: str
@@ -102,6 +103,7 @@ class AppConfig:
             "site_subtitle": self.app_subtitle,
             "site_description": self.app_description,
             "admin_email": self.admin_email,
+            "version": self.app_version,
         }
 
     def verify_admin_password(self, password: str) -> bool:
@@ -115,6 +117,7 @@ def _build_config() -> AppConfig:
         app_name=os.getenv("APP_NAME", "EasyMail"),
         app_subtitle=os.getenv("APP_SUBTITLE", "Compose 驱动的多邮箱 IMAP 管理平台"),
         app_description=os.getenv("APP_DESCRIPTION", "面向多邮箱账号的统一收件、管理与日志排查平台。"),
+        app_version=os.getenv("APP_VERSION", "0.1.0"),
         admin_email=str(runtime_config.get("admin_email") or "admin@easymail.local"),
         admin_password_hash=str(runtime_config.get("admin_password_hash") or ""),
         jwt_secret=str(runtime_config.get("jwt_secret") or secrets.token_urlsafe(48)),
