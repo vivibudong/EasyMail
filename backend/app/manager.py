@@ -62,9 +62,10 @@ class MailManager:
         self.mail_items: dict[str, MailItem] = {}
         self.body_tasks: dict[str, BodyTask] = {}
 
-        self.login_q: queue.Queue[MailAccount] = queue.Queue()
-        self.receive_q: queue.Queue[MailAccount] = queue.Queue()
+        self.login_q: queue.Queue[tuple[int, int, MailAccount]] = queue.PriorityQueue()
+        self.receive_q: queue.Queue[tuple[int, int, MailAccount]] = queue.PriorityQueue()
         self.body_q: queue.Queue[tuple[MailAccount, MailItem]] = queue.Queue()
+        self.queue_sequence = 0
 
         self.queued_login: set[str] = set()
         self.queued_receive: set[str] = set()
@@ -499,27 +500,44 @@ class MailManager:
         self.receive_done = 0
         self.receive_busy_email = ""
 
+    def _drain_queue(self, current_queue: queue.Queue) -> None:
+        while True:
+            try:
+                current_queue.get_nowait()
+            except queue.Empty:
+                break
+
     def _clear_runtime_queues(self) -> None:
         for current_queue in (self.login_q, self.receive_q, self.body_q):
-            while True:
-                try:
-                    current_queue.get_nowait()
-                except queue.Empty:
-                    break
+            self._drain_queue(current_queue)
 
-    def enqueue_login(self, account: MailAccount) -> None:
+    def _clear_receive_queue(self) -> None:
+        self._drain_queue(self.receive_q)
+        busy = {self.receive_busy_email} if self.receive_busy_email else set()
+        self.queued_receive = set(busy)
+
+    def _clear_login_queue(self) -> None:
+        self._drain_queue(self.login_q)
+        busy = {self.login_busy_email} if self.login_busy_email else set()
+        self.queued_login = set(busy)
+
+    def _next_queue_sequence(self) -> int:
+        self.queue_sequence += 1
+        return self.queue_sequence
+
+    def enqueue_login(self, account: MailAccount, priority: int = 50) -> None:
         if account.email in self.queued_login:
             return
         self.queued_login.add(account.email)
         self.login_total += 1
-        self.login_q.put(account)
+        self.login_q.put((priority, self._next_queue_sequence(), account))
 
-    def enqueue_receive(self, account: MailAccount) -> None:
+    def enqueue_receive(self, account: MailAccount, priority: int = 50) -> None:
         if account.email in self.queued_receive:
             return
         self.queued_receive.add(account.email)
         self.receive_total += 1
-        self.receive_q.put(account)
+        self.receive_q.put((priority, self._next_queue_sequence(), account))
 
     def enqueue_body(self, account: MailAccount, item: MailItem) -> BodyTask:
         if item.local_key in self.queued_body:
@@ -686,20 +704,36 @@ class MailManager:
                 "settings": settings_to_dict(self.settings),
             }
 
-    def start_receive_batch(self, targets: list[Optional[MailAccount]]) -> int:
+    def start_receive_batch(
+        self,
+        targets: list[Optional[MailAccount]],
+        *,
+        priority: int = 50,
+        interrupt_pending: bool = False,
+    ) -> int:
         with self.lock:
             items = [item for item in targets if item]
+            if interrupt_pending:
+                self._clear_receive_queue()
             self.reset_receive_progress()
             for account in items:
-                self.enqueue_receive(account)
+                self.enqueue_receive(account, priority=priority)
             return len(items)
 
-    def start_relogin_batch(self, targets: list[Optional[MailAccount]]) -> int:
+    def start_relogin_batch(
+        self,
+        targets: list[Optional[MailAccount]],
+        *,
+        priority: int = 50,
+        interrupt_pending: bool = False,
+    ) -> int:
         with self.lock:
             items = [item for item in targets if item]
+            if interrupt_pending:
+                self._clear_login_queue()
             self.reset_login_progress()
             for account in items:
-                self.enqueue_login(account)
+                self.enqueue_login(account, priority=priority)
             return len(items)
 
     def delete_accounts(self, emails: set[str]) -> int:
@@ -1057,8 +1091,13 @@ class MailManager:
                 continue
         return file_bytes.decode("utf-8", errors="ignore")
 
-    def import_accounts(self, file_bytes: bytes) -> dict:
+    def import_accounts(self, file_bytes: bytes, group_name: str = "") -> dict:
         with self.lock:
+            target_group = self._normalize_group_name(group_name) if group_name else ""
+            if target_group and target_group != "未分组" and not any(
+                item.name == target_group for item in self.settings.custom_groups
+            ):
+                raise ValueError("分组不存在，请先创建")
             content = self._decode_text_content(file_bytes)
             new_items = parse_text_to_accounts(
                 content,
@@ -1094,16 +1133,20 @@ class MailManager:
                         and old.imap_port == item.imap_port
                     )
                     if same:
+                        if target_group:
+                            old.group_name = target_group
                         if old.status != "登录成功":
                             need_login.append(old)
                         continue
-                    item.group_name = old.group_name
+                    item.group_name = target_group or old.group_name
                     item.flag_color = old.flag_color
                     item.tags = old.tags
                     item.mails = old.mails
                     merged[old_indices[key]] = item
                     need_login.append(item)
                     continue
+                if target_group:
+                    item.group_name = target_group
                 merged.append(item)
                 need_login.append(item)
 
@@ -1113,7 +1156,7 @@ class MailManager:
             self.reset_login_progress()
             self.reset_receive_progress()
             for account in need_login:
-                self.enqueue_login(account)
+                self.enqueue_login(account, priority=60)
             self.log_event("info", "account", "import", "batch", "批量导入邮箱", {"imported": len(new_items), "changed": len(need_login)})
             return {"imported": len(new_items), "changed": len(need_login)}
 
@@ -1625,7 +1668,7 @@ class MailManager:
                     and settings.auto_receive_interval_minutes > 0
                     and now - self.last_auto_receive_run_at >= settings.auto_receive_interval_minutes * 60
                 ):
-                    self.start_receive_batch(accounts)
+                    self.start_receive_batch(accounts, priority=80)
                     self.last_auto_receive_run_at = now
                     self._persist_scheduler_state()
                     self.log_event("info", "scheduler", "auto_receive", "scheduled", "触发定时收件", {"accounts": len(accounts)})
@@ -1642,7 +1685,7 @@ class MailManager:
 
     def login_worker(self) -> None:
         while True:
-            account = self.login_q.get()
+            _, _, account = self.login_q.get()
             with self.lock:
                 self.login_busy_email = account.email
                 account.status = "登录中"
@@ -1652,7 +1695,7 @@ class MailManager:
                     account.status = "登录成功"
                     account.auth_method = method or "-"
                     account.last_error = ""
-                    self.enqueue_receive(account)
+                    self.enqueue_receive(account, priority=20)
                     self.log_event("info", "auth", "login_success", account.email, "邮箱登录成功", {"method": method or "-"})
                 else:
                     account.status = "登录失败"
@@ -1666,7 +1709,7 @@ class MailManager:
 
     def receive_worker(self) -> None:
         while True:
-            account = self.receive_q.get()
+            _, _, account = self.receive_q.get()
             with self.lock:
                 self.receive_busy_email = account.email
                 account.status = "收信中"

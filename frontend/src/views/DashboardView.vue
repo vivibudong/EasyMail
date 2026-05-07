@@ -19,6 +19,9 @@
           <button class="btn btn-secondary btn-sm" :disabled="!hasSelection" @click="handleReloginChecked">
             重新登录
           </button>
+          <button class="btn btn-secondary btn-sm" :disabled="!hasSelection" @click="openBatchEditDialog">
+            批量整理
+          </button>
           <button class="btn btn-secondary btn-sm" :disabled="!hasSelection" @click="handleDeleteChecked">
             删除勾选
           </button>
@@ -874,6 +877,15 @@
                 <button class="tab" :class="{ 'tab-active': importMode === 'manual' }" @click="importMode = 'manual'">微软授权添加</button>
               </div>
 
+              <label v-if="importMode !== 'manual'" class="block space-y-2">
+                <span class="text-xs text-gray-500 dark:text-dark-400">导入到分组</span>
+                <select v-model="importGroupName" class="input text-sm">
+                  <option v-for="groupName in groupAssignmentOptions" :key="groupName" :value="groupName">
+                    {{ groupName }}
+                  </option>
+                </select>
+              </label>
+
               <div v-if="importMode === 'text'" class="space-y-2">
                 <textarea
                   v-model="importText"
@@ -972,6 +984,51 @@
       </transition>
 
       <transition name="modal">
+        <div v-if="batchEditDialogOpen" class="modal-overlay" @click.self="batchEditDialogOpen = false">
+          <div class="modal-content max-w-xl">
+            <div class="modal-header">
+              <div class="modal-title">批量整理邮箱</div>
+              <button class="btn btn-secondary btn-sm px-2 py-1" @click="batchEditDialogOpen = false">关闭</button>
+            </div>
+            <div class="modal-body space-y-4">
+              <div class="rounded-2xl border border-sky-100 bg-sky-50/70 px-4 py-3 text-sm text-sky-700 dark:border-sky-800/50 dark:bg-sky-900/10 dark:text-sky-300">
+                已选择 {{ checkedAccounts.length }} 个邮箱。
+              </div>
+              <label class="block space-y-2">
+                <span class="text-xs text-gray-500 dark:text-dark-400">批量移动到分组</span>
+                <select v-model="batchGroupName" class="input text-sm">
+                  <option v-for="groupName in groupAssignmentOptions" :key="groupName" :value="groupName">
+                    {{ groupName }}
+                  </option>
+                </select>
+              </label>
+              <div class="space-y-2">
+                <div class="text-xs text-gray-500 dark:text-dark-400">批量设置标签</div>
+                <div class="grid max-h-44 grid-cols-2 gap-2 overflow-y-auto rounded-2xl border border-gray-100 p-3 dark:border-dark-700">
+                  <label
+                    v-for="tag in customTags"
+                    :key="tag.name"
+                    class="flex items-center gap-2 text-sm text-gray-700 dark:text-dark-200"
+                  >
+                    <input v-model="batchTagNames" type="checkbox" :value="tag.name" />
+                    <span class="inline-block h-2.5 w-2.5 rounded-full" :style="{ backgroundColor: tag.color }"></span>
+                    <span class="truncate">{{ tag.name }}</span>
+                  </label>
+                  <div v-if="!customTags.length" class="col-span-2 text-sm text-gray-500">暂无标签，请先创建标签。</div>
+                </div>
+              </div>
+            </div>
+            <div class="modal-footer flex flex-wrap gap-2">
+              <button class="btn btn-secondary" @click="batchEditDialogOpen = false">取消</button>
+              <button class="btn btn-secondary" @click="submitBatchTags('remove')">移除所选标签</button>
+              <button class="btn btn-secondary" @click="submitBatchTags('add')">添加所选标签</button>
+              <button class="btn btn-primary" @click="submitBatchGroup">应用分组</button>
+            </div>
+          </div>
+        </div>
+      </transition>
+
+      <transition name="modal">
         <div v-if="graphReauthDialog.open" class="modal-overlay" @click.self="closeGraphReauthDialog">
           <div class="modal-content max-w-xl">
             <div class="modal-header">
@@ -1042,6 +1099,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import {
   assignAccountGroup,
+  batchAssignAccountGroup,
+  batchSetAccountTags,
   completeManualOauth,
   createGroupDetailed,
   createTag,
@@ -1130,8 +1189,12 @@ const editAccountOpen = ref(false)
 const importDialogOpen = ref(false)
 const importMode = ref<'text' | 'file' | 'manual'>('text')
 const importText = ref('')
+const importGroupName = ref('未分组')
 const selectedImportFile = ref<File | null>(null)
 const selectedImportFileName = ref('')
+const batchEditDialogOpen = ref(false)
+const batchGroupName = ref('未分组')
+const batchTagNames = ref<string[]>([])
 const manualOauthForm = ref({
   email: '',
   password: '',
@@ -1909,6 +1972,7 @@ function triggerImport() {
   importDialogOpen.value = true
   importMode.value = 'text'
   importText.value = ''
+  importGroupName.value = '未分组'
   selectedImportFile.value = null
   selectedImportFileName.value = ''
   manualOauthForm.value = {
@@ -2163,12 +2227,55 @@ async function submitImport() {
         return
       }
     }
-    const response = await importAccounts(payloadFile)
+    const response = await importAccounts(payloadFile, importGroupName.value)
     showSuccess(response.message)
     importDialogOpen.value = false
     await refreshState(true)
   } catch (error: any) {
     showError(error?.response?.data?.detail || '导入失败')
+  }
+}
+
+function openBatchEditDialog() {
+  if (!hasSelection.value) {
+    showError('请先勾选邮箱')
+    return
+  }
+  batchGroupName.value = '未分组'
+  batchTagNames.value = []
+  batchEditDialogOpen.value = true
+}
+
+async function submitBatchGroup() {
+  if (!checkedAccounts.value.length) {
+    showError('请先勾选邮箱')
+    return
+  }
+  try {
+    const response = await batchAssignAccountGroup(checkedAccounts.value, batchGroupName.value)
+    showSuccess(response.message)
+    batchEditDialogOpen.value = false
+    await refreshState(true)
+  } catch (error: any) {
+    showError(error?.response?.data?.detail || '批量修改分组失败')
+  }
+}
+
+async function submitBatchTags(mode: 'add' | 'remove') {
+  if (!checkedAccounts.value.length) {
+    showError('请先勾选邮箱')
+    return
+  }
+  if (!batchTagNames.value.length) {
+    showError('请选择标签')
+    return
+  }
+  try {
+    const response = await batchSetAccountTags(checkedAccounts.value, batchTagNames.value, mode)
+    showSuccess(response.message)
+    await refreshState(true)
+  } catch (error: any) {
+    showError(error?.response?.data?.detail || '批量修改标签失败')
   }
 }
 
@@ -2413,7 +2520,7 @@ async function handleReceiveAll() {
 
 async function handleReceiveChecked() {
   try {
-    const response = await receiveAccounts({ emails: checkedAccounts.value })
+    const response = await receiveAccounts({ emails: checkedAccounts.value, priority: true })
     showSuccess(response.message)
     await refreshState(true)
   } catch (error: any) {
@@ -2423,7 +2530,7 @@ async function handleReceiveChecked() {
 
 async function handleReloginChecked() {
   try {
-    const response = await reloginAccounts({ emails: checkedAccounts.value })
+    const response = await reloginAccounts({ emails: checkedAccounts.value, priority: true })
     showSuccess(response.message)
     await refreshState(true)
   } catch (error: any) {
@@ -2694,7 +2801,7 @@ async function toggleTagFromMenu(tagName: string) {
 async function runSingleReceive(email: string) {
   closeContextMenu()
   try {
-    const response = await receiveAccounts({ emails: [email] })
+    const response = await receiveAccounts({ emails: [email], priority: true })
     showSuccess(response.message)
     await refreshState(true)
   } catch (error: any) {
@@ -2705,7 +2812,7 @@ async function runSingleReceive(email: string) {
 async function runSingleRelogin(email: string) {
   closeContextMenu()
   try {
-    const response = await reloginAccounts({ emails: [email] })
+    const response = await reloginAccounts({ emails: [email], priority: true })
     showSuccess(response.message)
     await refreshState(true)
   } catch (error: any) {

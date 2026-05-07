@@ -101,6 +101,7 @@ class AdminCredentialsRequest(BaseModel):
 class AccountBatchRequest(BaseModel):
     emails: list[str] = Field(default_factory=list)
     include_all: bool = False
+    priority: bool = False
 
 
 class FlagRequest(BaseModel):
@@ -139,9 +140,20 @@ class AccountGroupRequest(BaseModel):
     group_name: str
 
 
+class AccountBatchGroupRequest(BaseModel):
+    emails: list[str] = Field(default_factory=list)
+    group_name: str
+
+
 class AccountTagsRequest(BaseModel):
     email: str
     tags: list[str] = Field(default_factory=list)
+
+
+class AccountBatchTagsRequest(BaseModel):
+    emails: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    mode: str = "add"
 
 
 class AccountUpdateRequest(BaseModel):
@@ -232,6 +244,7 @@ class ApiBatchFlagRequest(BaseModel):
 class ApiAccountImportRequest(BaseModel):
     mode: str = "text"
     content: str
+    group_name: str = ""
 
 
 class ApiTaskTargetRequest(BaseModel):
@@ -944,11 +957,12 @@ def dashboard_state(
 @app.post("/api/accounts/import")
 async def import_accounts(
     file: UploadFile = File(...),
+    group_name: str = Query(default=""),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     file_bytes = await file.read()
     try:
-        result = manager.import_accounts(file_bytes)
+        result = manager.import_accounts(file_bytes, group_name=group_name)
     except re.error as exc:
         raise HTTPException(status_code=400, detail=f"分隔符正则无效: {exc}") from exc
     except ValueError as exc:
@@ -964,7 +978,11 @@ def receive_accounts(
     payload: AccountBatchRequest,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    queued = manager.start_receive_batch(resolve_targets(payload))
+    queued = manager.start_receive_batch(
+        resolve_targets(payload),
+        priority=0 if payload.priority else 50,
+        interrupt_pending=payload.priority,
+    )
     return ok(f"收件任务已加入队列，共 {queued} 个邮箱", {"queued": queued})
 
 
@@ -973,7 +991,11 @@ def relogin_accounts(
     payload: AccountBatchRequest,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    queued = manager.start_relogin_batch(resolve_targets(payload))
+    queued = manager.start_relogin_batch(
+        resolve_targets(payload),
+        priority=0 if payload.priority else 50,
+        interrupt_pending=payload.priority,
+    )
     return ok(f"重新登录任务已加入队列，共 {queued} 个邮箱", {"queued": queued})
 
 
@@ -1092,6 +1114,18 @@ def assign_account_group(
     return ok("邮箱分组已更新")
 
 
+@app.patch("/api/accounts/batch-group")
+def batch_assign_account_group(
+    payload: AccountBatchGroupRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    try:
+        changed = manager.batch_assign_group(payload.emails, payload.group_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(f"已批量修改 {changed} 个邮箱分组", {"changed": changed})
+
+
 @app.patch("/api/accounts/tags")
 def set_account_tags(
     payload: AccountTagsRequest,
@@ -1102,6 +1136,18 @@ def set_account_tags(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ok("邮箱标签已更新", {"tags": tags})
+
+
+@app.patch("/api/accounts/batch-tags")
+def batch_set_account_tags(
+    payload: AccountBatchTagsRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    try:
+        changed = manager.batch_patch_account_tags(payload.emails, payload.tags, payload.mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(f"已批量更新 {changed} 个邮箱标签", {"changed": changed})
 
 
 @app.get("/api/accounts/detail")
@@ -1996,7 +2042,7 @@ def api_v1_import_accounts(
     if payload.mode != "text":
         raise HTTPException(status_code=400, detail="当前接口仅支持 mode=text")
     try:
-        result = manager.import_accounts(payload.content.encode("utf-8"))
+        result = manager.import_accounts(payload.content.encode("utf-8"), group_name=payload.group_name)
     except (ValueError, re.error) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _api_audit(request, api_user, "import_accounts", "text", {"imported": result.get("imported"), "changed": result.get("changed")})
@@ -2007,11 +2053,12 @@ def api_v1_import_accounts(
 async def api_v1_import_accounts_file(
     request: Request,
     file: UploadFile = File(...),
+    group_name: str = Query(default=""),
     api_user: dict = Depends(require_api_scope("write:accounts")),
 ) -> dict:
     file_bytes = await file.read()
     try:
-        result = manager.import_accounts(file_bytes)
+        result = manager.import_accounts(file_bytes, group_name=group_name)
     except (ValueError, re.error) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _api_audit(request, api_user, "import_accounts_file", file.filename or "file", {"imported": result.get("imported"), "changed": result.get("changed")})
@@ -2025,7 +2072,7 @@ def api_v1_receive(
     api_user: dict = Depends(require_api_scope("task:receive")),
 ) -> dict:
     targets = _resolve_api_targets(payload)
-    queued = manager.start_receive_batch(targets)
+    queued = manager.start_receive_batch(targets, priority=0, interrupt_pending=True)
     _api_audit(request, api_user, "receive", "batch", {"queued": queued})
     return api_ok("收件任务已加入队列", {"queued": queued, "queue": manager.queue_details()}, _request_id(request))
 
@@ -2037,7 +2084,7 @@ def api_v1_relogin(
     api_user: dict = Depends(require_api_scope("task:login")),
 ) -> dict:
     targets = _resolve_api_targets(payload)
-    queued = manager.start_relogin_batch(targets)
+    queued = manager.start_relogin_batch(targets, priority=0, interrupt_pending=True)
     _api_audit(request, api_user, "relogin", "batch", {"queued": queued})
     return api_ok("重新登录任务已加入队列", {"queued": queued, "queue": manager.queue_details()}, _request_id(request))
 

@@ -8,28 +8,32 @@ export async function getDashboardState(accountEmail?: string) {
   return data
 }
 
-export async function importAccounts(file: File) {
+export async function importAccounts(file: File, groupName = '') {
   const form = new FormData()
   form.append('file', file)
+  const params = groupName ? { group_name: groupName } : undefined
   const { data } = await apiClient.post<ApiResponse<{ imported: number; changed: number }>>(
     '/accounts/import',
     form,
+    { params },
   )
   return data
 }
 
-export async function receiveAccounts(payload: { emails: string[]; include_all?: boolean }) {
+export async function receiveAccounts(payload: { emails: string[]; include_all?: boolean; priority?: boolean }) {
   const { data } = await apiClient.post<ApiResponse<{ queued: number }>>('/accounts/receive', {
     emails: payload.emails,
     include_all: payload.include_all ?? false,
+    priority: payload.priority ?? false,
   })
   return data
 }
 
-export async function reloginAccounts(payload: { emails: string[]; include_all?: boolean }) {
+export async function reloginAccounts(payload: { emails: string[]; include_all?: boolean; priority?: boolean }) {
   const { data } = await apiClient.post<ApiResponse<{ queued: number }>>('/accounts/relogin', {
     emails: payload.emails,
     include_all: payload.include_all ?? false,
+    priority: payload.priority ?? false,
   })
   return data
 }
@@ -98,10 +102,27 @@ export async function assignAccountGroup(email: string, groupName: string) {
   return data
 }
 
+export async function batchAssignAccountGroup(emails: string[], groupName: string) {
+  const { data } = await apiClient.patch<ApiResponse<{ changed: number }>>('/accounts/batch-group', {
+    emails,
+    group_name: groupName,
+  })
+  return data
+}
+
 export async function setAccountTags(email: string, tags: string[]) {
   const { data } = await apiClient.patch<ApiResponse<{ tags: string[] }>>('/accounts/tags', {
     email,
     tags,
+  })
+  return data
+}
+
+export async function batchSetAccountTags(emails: string[], tags: string[], mode: 'add' | 'remove' | 'replace' = 'add') {
+  const { data } = await apiClient.patch<ApiResponse<{ changed: number }>>('/accounts/batch-tags', {
+    emails,
+    tags,
+    mode,
   })
   return data
 }
