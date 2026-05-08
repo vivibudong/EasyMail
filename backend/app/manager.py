@@ -358,6 +358,19 @@ class MailManager:
     def _sort_groups(self, groups: list[GroupDefinition]) -> list[GroupDefinition]:
         return sorted(groups, key=lambda item: (-item.priority, item.name.lower()))
 
+    def _group_is_locked(self, group_name: str) -> bool:
+        normalized = self._normalize_group_name(group_name)
+        return any(item.name == normalized and item.locked for item in self.settings.custom_groups)
+
+    def _ensure_account_not_locked(self, account: MailAccount, action: str) -> None:
+        if self._group_is_locked(account.group_name):
+            raise ValueError(f"分组 {account.group_name} 已上锁，禁止{action}: {account.email}")
+
+    def _ensure_accounts_not_locked(self, accounts: list[MailAccount], action: str) -> None:
+        locked = [account.email for account in accounts if self._group_is_locked(account.group_name)]
+        if locked:
+            raise ValueError(f"包含已上锁分组邮箱，禁止{action}: {', '.join(locked[:10])}")
+
     def _sort_tags(self, tags: list[TagDefinition]) -> list[TagDefinition]:
         return sorted(tags, key=lambda item: (-item.priority, item.name.lower()))
 
@@ -713,6 +726,7 @@ class MailManager:
     ) -> int:
         with self.lock:
             items = [item for item in targets if item]
+            self._ensure_accounts_not_locked(items, "收件")
             if interrupt_pending:
                 self._clear_receive_queue()
             self.reset_receive_progress()
@@ -729,6 +743,7 @@ class MailManager:
     ) -> int:
         with self.lock:
             items = [item for item in targets if item]
+            self._ensure_accounts_not_locked(items, "重新登录")
             if interrupt_pending:
                 self._clear_login_queue()
             self.reset_login_progress()
@@ -740,6 +755,8 @@ class MailManager:
         with self.lock:
             if not emails:
                 return 0
+            targets = [account for account in self.accounts if account.email in emails]
+            self._ensure_accounts_not_locked(targets, "删除")
             for email_addr in emails:
                 self.storage.remove_mail_cache(email_addr)
                 prefix = f"{email_addr}|"
@@ -762,6 +779,7 @@ class MailManager:
             account = self.find_account(email_addr)
             if not account:
                 raise ValueError("邮箱不存在")
+            self._ensure_account_not_locked(account, "修改旗标")
             account.flag_color = color
             self._save_accounts_state()
 
@@ -772,13 +790,14 @@ class MailManager:
                 account = self.find_account(email_addr)
                 if not account:
                     continue
+                self._ensure_account_not_locked(account, "修改旗标")
                 account.flag_color = color
                 changed += 1
             if changed:
                 self._save_accounts_state()
         return changed
 
-    def create_group(self, group_name: str, color: str = "#D6EAF8", priority: int = 100) -> list[dict]:
+    def create_group(self, group_name: str, color: str = "#D6EAF8", priority: int = 100, locked: bool = False) -> list[dict]:
         with self.lock:
             normalized = self._normalize_group_name(group_name)
             if normalized == "未分组":
@@ -790,14 +809,15 @@ class MailManager:
                     name=normalized,
                     color=color.strip() or "#D6EAF8",
                     priority=max(1, min(999, int(priority or 100))),
+                    locked=bool(locked),
                 )
             )
             self.settings.custom_groups = self._sort_groups(self.settings.custom_groups)
             self.storage.save_settings(self.settings)
-            self.log_event("info", "group", "create", normalized, "创建分组", {"color": color, "priority": priority})
+            self.log_event("info", "group", "create", normalized, "创建分组", {"color": color, "priority": priority, "locked": bool(locked)})
             return settings_to_dict(self.settings)["custom_groups"]
 
-    def update_group(self, original_name: str, new_name: str, color: str, priority: int) -> list[dict]:
+    def update_group(self, original_name: str, new_name: str, color: str, priority: int, locked: bool = False) -> list[dict]:
         with self.lock:
             if original_name == "未分组":
                 raise ValueError("未分组不能直接修改")
@@ -813,10 +833,11 @@ class MailManager:
             target.name = normalized
             target.color = color.strip() or "#D6EAF8"
             target.priority = max(1, min(999, int(priority or 100)))
+            target.locked = bool(locked)
             self.settings.custom_groups = self._sort_groups(self.settings.custom_groups)
             self._save_accounts_state()
             self.storage.save_settings(self.settings)
-            self.log_event("info", "group", "update", normalized, "更新分组", {"original_name": original_name, "color": color, "priority": priority})
+            self.log_event("info", "group", "update", normalized, "更新分组", {"original_name": original_name, "color": color, "priority": priority, "locked": bool(locked)})
             return settings_to_dict(self.settings)["custom_groups"]
 
     def delete_group(self, group_name: str) -> list[dict]:
@@ -843,6 +864,7 @@ class MailManager:
             account = self.find_account(email_addr)
             if not account:
                 raise ValueError("邮箱不存在")
+            self._ensure_account_not_locked(account, "转移分组")
             normalized = self._normalize_group_name(group_name)
             if normalized != "未分组" and not any(
                 item.name == normalized for item in self.settings.custom_groups
@@ -864,6 +886,7 @@ class MailManager:
                 account = self.find_account(email_addr)
                 if not account:
                     continue
+                self._ensure_account_not_locked(account, "转移分组")
                 account.group_name = normalized
                 changed += 1
             if changed:
@@ -928,6 +951,7 @@ class MailManager:
             account = self.find_account(email_addr)
             if not account:
                 raise ValueError("邮箱不存在")
+            self._ensure_account_not_locked(account, "修改标签")
             valid_names = {item.name for item in self.settings.custom_tags}
             cleaned: list[str] = []
             for item in tags:
@@ -948,6 +972,7 @@ class MailManager:
             account = self.find_account(email_addr)
             if not account:
                 raise ValueError("邮箱不存在")
+            self._ensure_account_not_locked(account, "修改标签")
             valid_names = {item.name for item in self.settings.custom_tags}
             cleaned = []
             for item in tags:
@@ -989,6 +1014,7 @@ class MailManager:
                 account = self.find_account(email_addr)
                 if not account:
                     continue
+                self._ensure_account_not_locked(account, "修改标签")
                 current = list(account.tags)
                 if mode == "remove":
                     account.tags = [item for item in current if item not in set(cleaned)]
@@ -1053,9 +1079,12 @@ class MailManager:
             account.token = str(payload.get("token", account.token))
             account.imap_host = str(payload.get("imap_host", account.imap_host))
             account.imap_port = int(payload.get("imap_port", account.imap_port) or account.imap_port)
-            account.group_name = self._normalize_group_name(
+            next_group = self._normalize_group_name(
                 str(payload.get("group_name", account.group_name))
             )
+            if next_group != account.group_name:
+                self._ensure_account_not_locked(account, "转移分组")
+            account.group_name = next_group
             account.flag_color = str(payload.get("flag_color", account.flag_color))
             account.note = str(payload.get("note", account.note) or "").strip()
             valid_names = {item.name for item in self.settings.custom_tags}
@@ -1133,11 +1162,14 @@ class MailManager:
                         and old.imap_port == item.imap_port
                     )
                     if same:
-                        if target_group:
+                        if target_group and target_group != old.group_name:
+                            self._ensure_account_not_locked(old, "转移分组")
                             old.group_name = target_group
                         if old.status != "登录成功":
                             need_login.append(old)
                         continue
+                    if target_group and target_group != old.group_name:
+                        self._ensure_account_not_locked(old, "转移分组")
                     item.group_name = target_group or old.group_name
                     item.flag_color = old.flag_color
                     item.tags = old.tags
@@ -1286,6 +1318,7 @@ class MailManager:
                         name=normalized,
                         color=str(item.get("color", "#D6EAF8") or "#D6EAF8"),
                         priority=max(1, min(999, int(item.get("priority", 100) or 100))),
+                        locked=bool(item.get("locked", False)),
                     )
                 )
             self.settings.custom_groups = self._sort_groups(next_groups)
@@ -1400,7 +1433,10 @@ class MailManager:
             if self.token_refresh_running:
                 raise ValueError("Token 刷新任务正在执行")
             self.token_refresh_running = True
-            accounts = [item for item in self.accounts if item.token and item.auth_code_or_client_id]
+            accounts = [
+                item for item in self.accounts
+                if item.token and item.auth_code_or_client_id and not self._group_is_locked(item.group_name)
+            ]
         self.log_event("info", "token_refresh", "start", trigger_source, "开始刷新 Token", {"count": len(accounts)})
         try:
             results: list[dict] = []

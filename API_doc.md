@@ -253,7 +253,8 @@ POST /api/v1/groups
 {
   "name": "私有组",
   "color": "#38bdf8",
-  "priority": 100
+  "priority": 100,
+  "locked": false
 }
 ```
 
@@ -269,9 +270,12 @@ PATCH /api/v1/groups/{group_name}
 {
   "name": "新分组名",
   "color": "#06b6d4",
-  "priority": 200
+  "priority": 200,
+  "locked": true
 }
 ```
+
+`locked=true` 后，该分组下邮箱禁止转移分组、删除、重新登录、收件、修改标签、修改旗标、重新授权等风险操作。后台与 `/api/v1` 接口都会执行相同拦截。
 
 需要权限：`write:taxonomy`
 
@@ -417,6 +421,21 @@ POST /api/v1/accounts/batch/tags
 
 需要权限：`write:taxonomy`
 
+### 批量覆盖标签
+
+```http
+PUT /api/v1/accounts/batch/tags
+```
+
+```json
+{
+  "emails": ["a@example.com", "b@example.com"],
+  "tags": ["重要", "待处理"]
+}
+```
+
+需要权限：`write:taxonomy`
+
 ### 批量移除标签
 
 ```http
@@ -494,9 +513,12 @@ POST /api/v1/accounts/import
 ```json
 {
   "mode": "text",
-  "content": "a@outlook.com----password----client_id----refresh_token"
+  "content": "a@outlook.com----password----client_id----refresh_token",
+  "group_name": "私有组"
 }
 ```
+
+`group_name` 可选；不传时按默认导入规则归入“未分组”或保留已有分组。若目标邮箱当前位于已锁定分组，导入时不能把它转移到其他分组。
 
 导入后会自动加入登录队列。
 
@@ -514,6 +536,7 @@ Content-Type: multipart/form-data
 | 字段 | 说明 |
 | --- | --- |
 | `file` | txt 文件 |
+| `group_name` | 可选 query 参数，导入到指定分组 |
 
 需要权限：`write:accounts`
 

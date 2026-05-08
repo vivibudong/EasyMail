@@ -60,18 +60,18 @@ export async function createGroup(name: string) {
   return data
 }
 
-export async function createGroupDetailed(payload: { name: string; color: string; priority: number }) {
-  const { data } = await apiClient.post<ApiResponse<{ custom_groups: Array<{ name: string; color: string; priority: number }> }>>('/groups', payload)
+export async function createGroupDetailed(payload: { name: string; color: string; priority: number; locked?: boolean }) {
+  const { data } = await apiClient.post<ApiResponse<{ custom_groups: Array<{ name: string; color: string; priority: number; locked: boolean }> }>>('/groups', payload)
   return data
 }
 
-export async function updateGroup(payload: { original_name: string; name: string; color: string; priority: number }) {
-  const { data } = await apiClient.put<ApiResponse<{ custom_groups: Array<{ name: string; color: string; priority: number }> }>>('/groups', payload)
+export async function updateGroup(payload: { original_name: string; name: string; color: string; priority: number; locked?: boolean }) {
+  const { data } = await apiClient.put<ApiResponse<{ custom_groups: Array<{ name: string; color: string; priority: number; locked: boolean }> }>>('/groups', payload)
   return data
 }
 
 export async function deleteGroup(name: string) {
-  const { data } = await apiClient.delete<ApiResponse<{ custom_groups: Array<{ name: string; color: string; priority: number }> }>>('/groups', {
+  const { data } = await apiClient.delete<ApiResponse<{ custom_groups: Array<{ name: string; color: string; priority: number; locked: boolean }> }>>('/groups', {
     params: { name },
   })
   return data

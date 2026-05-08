@@ -57,6 +57,7 @@ class GroupDefinition:
     name: str
     color: str = "#D6EAF8"
     priority: int = 100
+    locked: bool = False
 
 
 @dataclass
@@ -221,7 +222,7 @@ def settings_to_dict(settings: AppSettings) -> dict:
         "mail_list_limit": settings.mail_list_limit,
         "mark_read_on_open": settings.mark_read_on_open,
         "custom_groups": [
-            {"name": item.name, "color": item.color, "priority": item.priority}
+            {"name": item.name, "color": item.color, "priority": item.priority, "locked": item.locked}
             for item in settings.custom_groups
         ],
         "custom_tags": [
@@ -298,6 +299,7 @@ def settings_from_dict(data: dict) -> AppSettings:
                         name=name,
                         color=str(item.get("color", "#D6EAF8") or "#D6EAF8"),
                         priority=max(1, min(999, int(item.get("priority", 100) or 100))),
+                        locked=bool(item.get("locked", False)),
                     )
                 )
 

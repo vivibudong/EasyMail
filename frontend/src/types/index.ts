@@ -15,6 +15,7 @@ export interface GroupDefinition {
   name: string
   color: string
   priority: number
+  locked: boolean
 }
 
 export interface TagDefinition {

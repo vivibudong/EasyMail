@@ -113,6 +113,7 @@ class GroupRequest(BaseModel):
     name: str
     color: str = "#D6EAF8"
     priority: int = 100
+    locked: bool = False
 
 
 class GroupUpdateRequest(BaseModel):
@@ -120,6 +121,7 @@ class GroupUpdateRequest(BaseModel):
     name: str
     color: str = "#D6EAF8"
     priority: int = 100
+    locked: bool = False
 
 
 class TagRequest(BaseModel):
@@ -206,6 +208,7 @@ class ApiGroupRequest(BaseModel):
     name: str
     color: str = "#D6EAF8"
     priority: int = 100
+    locked: bool = False
 
 
 class ApiTagRequest(BaseModel):
@@ -739,6 +742,7 @@ def _apply_graph_reauth_success(session: GraphReauthSession, token_payload: dict
     if not account:
         raise ValueError("账号不存在，无法保存新令牌")
     with manager.lock:
+        manager._ensure_account_not_locked(account, "重新授权")
         account.auth_code_or_client_id = session.client_id
         account.token = refresh_token
         account.cached_access_token = ""
@@ -1026,7 +1030,7 @@ def create_group(
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     try:
-        groups = manager.create_group(payload.name, payload.color, payload.priority)
+        groups = manager.create_group(payload.name, payload.color, payload.priority, payload.locked)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ok("分组已创建", {"custom_groups": groups})
@@ -1043,6 +1047,7 @@ def update_group(
             payload.name,
             payload.color,
             payload.priority,
+            payload.locked,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1182,6 +1187,10 @@ def start_graph_reauth(
     account = manager.find_account(payload.email)
     if not account:
         raise HTTPException(status_code=404, detail="邮箱不存在")
+    try:
+        manager._ensure_account_not_locked(account, "重新授权")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     client_id = account.auth_code_or_client_id.strip()
     if not client_id:
         raise HTTPException(status_code=400, detail="当前账号缺少 Client ID，无法发起 Graph 重新授权")
@@ -1374,6 +1383,10 @@ def complete_manual_oauth(
     with manager.lock:
         existing = manager.find_account(actual_email)
         if existing:
+            try:
+                manager._ensure_account_not_locked(existing, "重新授权")
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             existing.password = str(session["password"] or existing.password)
             existing.auth_code_or_client_id = str(session["client_id"])
             existing.token = refresh_token
@@ -1792,7 +1805,7 @@ def api_v1_create_group(
     api_user: dict = Depends(require_api_scope("write:taxonomy")),
 ) -> dict:
     try:
-        groups = manager.create_group(payload.name, payload.color, payload.priority)
+        groups = manager.create_group(payload.name, payload.color, payload.priority, payload.locked)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _api_audit(request, api_user, "create_group", payload.name, payload.model_dump())
@@ -1807,7 +1820,7 @@ def api_v1_update_group(
     api_user: dict = Depends(require_api_scope("write:taxonomy")),
 ) -> dict:
     try:
-        groups = manager.update_group(group_name, payload.name, payload.color, payload.priority)
+        groups = manager.update_group(group_name, payload.name, payload.color, payload.priority, payload.locked)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _api_audit(request, api_user, "update_group", group_name, payload.model_dump())
@@ -1966,6 +1979,20 @@ def api_v1_batch_add_tags(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _api_audit(request, api_user, "batch_add_tags", "batch", payload.model_dump())
     return api_ok("批量标签已添加", {"changed": changed}, _request_id(request))
+
+
+@app.put("/api/v1/accounts/batch/tags")
+def api_v1_batch_replace_tags(
+    request: Request,
+    payload: ApiBatchTagsRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        changed = manager.batch_patch_account_tags(payload.emails, payload.tags, "replace")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "batch_replace_tags", "batch", payload.model_dump())
+    return api_ok("批量标签已覆盖", {"changed": changed}, _request_id(request))
 
 
 @app.delete("/api/v1/accounts/batch/tags")

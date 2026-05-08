@@ -79,6 +79,7 @@
                         :style="{ backgroundColor: group.color || '#D6EAF8' }"
                       ></span>
                       <span class="min-w-0 flex-1 truncate">{{ group.label }}</span>
+                      <span v-if="group.locked" class="flex-shrink-0 text-[10px] text-amber-600 dark:text-amber-300">锁</span>
                       <span class="flex-shrink-0 text-[10px] opacity-70">({{ group.accountCount }})</span>
                     </button>
                   </div>
@@ -837,6 +838,15 @@
                 <span class="text-xs text-gray-500 dark:text-dark-400">优先级（1-999）</span>
                 <input v-model.number="taxonomyDialog.form.priority" class="input" type="number" min="1" max="999" />
               </label>
+              <label v-if="taxonomyDialog.type === 'group'" class="flex items-start gap-3 rounded-2xl border border-gray-100 p-3 text-sm dark:border-dark-700">
+                <input v-model="taxonomyDialog.form.locked" class="mt-1" type="checkbox" />
+                <span>
+                  <span class="block font-semibold text-gray-800 dark:text-dark-100">锁定分组</span>
+                  <span class="mt-1 block text-xs leading-5 text-gray-500 dark:text-dark-400">
+                    锁定后，该分组下邮箱禁止转移分组、删除、重新登录、收件、改标签、改旗标等风险操作，API 同样会被拒绝。
+                  </span>
+                </span>
+              </label>
             </div>
             <div class="modal-footer">
               <button class="btn btn-primary" @click="saveTaxonomyDialog">保存</button>
@@ -1152,6 +1162,7 @@ type GroupOption = {
   accountCount: number
   color: string
   priority: number
+  locked: boolean
 }
 
 type TagOption = {
@@ -1300,6 +1311,7 @@ const taxonomyDialog = ref({
     name: '',
     color: '#D6EAF8',
     priority: 100,
+    locked: false,
   },
 })
 const confirmDialog = ref({
@@ -1342,7 +1354,7 @@ const groupOptions = computed<GroupOption[]>(() => {
   const options: GroupOption[] = []
   const accounts = allAccounts.value
   const groupDefs: GroupDefinition[] = [
-    { name: '未分组', color: '#D6EAF8', priority: 1000 },
+    { name: '未分组', color: '#D6EAF8', priority: 1000, locked: false },
     ...customGroups.value,
   ]
 
@@ -1352,6 +1364,7 @@ const groupOptions = computed<GroupOption[]>(() => {
     accountCount: accounts.length,
     color: '#CBD5E1',
     priority: 2000,
+    locked: false,
   })
 
   groupDefs.forEach((groupDef) => {
@@ -1362,6 +1375,7 @@ const groupOptions = computed<GroupOption[]>(() => {
       accountCount: accountsInGroup.length,
       color: groupDef.color,
       priority: groupDef.priority,
+      locked: groupDef.locked,
     })
   })
 
@@ -1372,6 +1386,7 @@ const groupOptions = computed<GroupOption[]>(() => {
     accountCount: new Set(starredMails.map((mail) => mail.account_email)).size,
     color: '#FBBF24',
     priority: 1500,
+    locked: false,
   })
 
   return options
@@ -2285,7 +2300,7 @@ async function handleCreateGroup() {
     type: 'group',
     mode: 'create',
     original_name: '',
-    form: { name: '', color: '#D6EAF8', priority: 100 },
+    form: { name: '', color: '#D6EAF8', priority: 100, locked: false },
   }
 }
 
@@ -2295,7 +2310,7 @@ async function handleCreateTag() {
     type: 'tag',
     mode: 'create',
     original_name: '',
-    form: { name: '', color: '#BFDBFE', priority: 100 },
+    form: { name: '', color: '#BFDBFE', priority: 100, locked: false },
   }
 }
 
@@ -2611,7 +2626,7 @@ function openGroupEditor(mode: 'edit') {
     type: 'group',
     mode,
     original_name: target.name,
-    form: { name: target.name, color: target.color, priority: target.priority },
+    form: { name: target.name, color: target.color, priority: target.priority, locked: target.locked },
   }
   closeContextMenu()
 }
@@ -2624,7 +2639,7 @@ function openTagEditor(mode: 'edit') {
     type: 'tag',
     mode,
     original_name: target.name,
-    form: { name: target.name, color: target.color, priority: target.priority },
+    form: { name: target.name, color: target.color, priority: target.priority, locked: false },
   }
   closeContextMenu()
 }
