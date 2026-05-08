@@ -843,7 +843,7 @@
                 <span>
                   <span class="block font-semibold text-gray-800 dark:text-dark-100">锁定分组</span>
                   <span class="mt-1 block text-xs leading-5 text-gray-500 dark:text-dark-400">
-                    锁定后，该分组下邮箱禁止转移分组、删除、重新登录、收件、改标签、改旗标等风险操作，API 同样会被拒绝。
+                    锁定后，该分组下邮箱禁止转移分组、删除、重新登录、重新授权；收件、Token 刷新、改标签和改旗标仍允许执行。
                   </span>
                 </span>
               </label>

@@ -726,7 +726,6 @@ class MailManager:
     ) -> int:
         with self.lock:
             items = [item for item in targets if item]
-            self._ensure_accounts_not_locked(items, "收件")
             if interrupt_pending:
                 self._clear_receive_queue()
             self.reset_receive_progress()
@@ -779,7 +778,6 @@ class MailManager:
             account = self.find_account(email_addr)
             if not account:
                 raise ValueError("邮箱不存在")
-            self._ensure_account_not_locked(account, "修改旗标")
             account.flag_color = color
             self._save_accounts_state()
 
@@ -790,7 +788,6 @@ class MailManager:
                 account = self.find_account(email_addr)
                 if not account:
                     continue
-                self._ensure_account_not_locked(account, "修改旗标")
                 account.flag_color = color
                 changed += 1
             if changed:
@@ -951,7 +948,6 @@ class MailManager:
             account = self.find_account(email_addr)
             if not account:
                 raise ValueError("邮箱不存在")
-            self._ensure_account_not_locked(account, "修改标签")
             valid_names = {item.name for item in self.settings.custom_tags}
             cleaned: list[str] = []
             for item in tags:
@@ -972,7 +968,6 @@ class MailManager:
             account = self.find_account(email_addr)
             if not account:
                 raise ValueError("邮箱不存在")
-            self._ensure_account_not_locked(account, "修改标签")
             valid_names = {item.name for item in self.settings.custom_tags}
             cleaned = []
             for item in tags:
@@ -1014,7 +1009,6 @@ class MailManager:
                 account = self.find_account(email_addr)
                 if not account:
                     continue
-                self._ensure_account_not_locked(account, "修改标签")
                 current = list(account.tags)
                 if mode == "remove":
                     account.tags = [item for item in current if item not in set(cleaned)]
@@ -1433,10 +1427,7 @@ class MailManager:
             if self.token_refresh_running:
                 raise ValueError("Token 刷新任务正在执行")
             self.token_refresh_running = True
-            accounts = [
-                item for item in self.accounts
-                if item.token and item.auth_code_or_client_id and not self._group_is_locked(item.group_name)
-            ]
+            accounts = [item for item in self.accounts if item.token and item.auth_code_or_client_id]
         self.log_event("info", "token_refresh", "start", trigger_source, "开始刷新 Token", {"count": len(accounts)})
         try:
             results: list[dict] = []
