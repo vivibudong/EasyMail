@@ -1427,8 +1427,18 @@ class MailManager:
             if self.token_refresh_running:
                 raise ValueError("Token 刷新任务正在执行")
             self.token_refresh_running = True
+            # Token refresh is intentionally allowed for locked groups. The lock only
+            # protects risky account changes such as move/delete/relogin/reauthorize.
             accounts = [item for item in self.accounts if item.token and item.auth_code_or_client_id]
-        self.log_event("info", "token_refresh", "start", trigger_source, "开始刷新 Token", {"count": len(accounts)})
+            locked_count = sum(1 for item in accounts if self._group_is_locked(item.group_name))
+        self.log_event(
+            "info",
+            "token_refresh",
+            "start",
+            trigger_source,
+            "开始刷新 Token",
+            {"count": len(accounts), "locked_group_count": locked_count},
+        )
         try:
             results: list[dict] = []
             success_count = 0
@@ -1457,6 +1467,7 @@ class MailManager:
                 "total": len(accounts),
                 "success_count": success_count,
                 "failed_count": failed_count,
+                "locked_group_count": locked_count,
                 "results": results,
             }
             self.storage.append_refresh_history(trigger_source, summary)
