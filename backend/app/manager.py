@@ -142,7 +142,19 @@ class MailManager:
         self.rebuild_mail_pool()
         self._start_workers()
         if self.accounts and self.settings.startup_auto_login:
-            self.start_relogin_batch(self.accounts.copy())
+            startup_accounts = [item for item in self.accounts.copy() if not self._group_is_locked(item.group_name)]
+            skipped_locked = len(self.accounts) - len(startup_accounts)
+            if skipped_locked:
+                self.log_event(
+                    "info",
+                    "login",
+                    "startup_skip_locked",
+                    "startup",
+                    "启动自动登录跳过锁定分组邮箱",
+                    {"skipped": skipped_locked},
+                )
+            if startup_accounts:
+                self.start_relogin_batch(startup_accounts)
 
     def _start_workers(self) -> None:
         threading.Thread(target=self.login_worker, daemon=True).start()
