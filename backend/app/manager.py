@@ -18,13 +18,21 @@ from zoneinfo import ZoneInfo
 
 from .code_extractor import extract_verification_codes
 from .imap_logic import (
+    TOKEN_ROTATION_ESTIMATED_DAYS,
+    _is_outlook_graph_candidate,
+    delete_mails_remote,
+    download_all_mail_attachments,
+    download_mail_attachment,
+    fetch_mail_attachments_metadata,
     fetch_mail_body,
     fetch_mails_once,
     format_shanghai_time,
     get_graph_access_token,
     get_oauth_access_token,
+    mark_mails_read_remote,
     parse_text_to_accounts,
     probe_account_login,
+    send_mail_via_graph,
 )
 from .models import (
     AppSettings,
@@ -614,6 +622,10 @@ class MailManager:
                 winner.body_html = loser.body_html
             if not winner.verification_codes and loser.verification_codes:
                 winner.verification_codes = loser.verification_codes
+            if not winner.attachments and loser.attachments:
+                winner.attachments = loser.attachments
+            if loser.has_attachments:
+                winner.has_attachments = True
             if loser.is_starred:
                 winner.is_starred = True
             if not loser.is_unread:
@@ -824,6 +836,11 @@ class MailManager:
             "auth_method": account.auth_method,
             "flag_color": account.flag_color,
             "mail_count": len(account.mails),
+            "last_token_refresh_at": account.last_token_refresh_at,
+            "last_token_success_at": account.last_token_success_at,
+            "last_token_rotated_at": account.last_token_rotated_at,
+            "token_expires_at": account.token_expires_at,
+            "can_send_graph": _is_outlook_graph_candidate(account),
         }
 
     def serialize_mail(self, item: MailItem, *, include_body: bool = True) -> dict:
@@ -846,6 +863,8 @@ class MailManager:
             "body_text": item.body_text if include_body else "",
             "body_html": item.body_html if include_body else "",
             "verification_codes": item.verification_codes,
+            "has_attachments": bool(item.has_attachments or bool(item.attachments)),
+            "attachments": item.attachments if include_body else [],
         }
 
     def refresh_verification_codes(self, item: MailItem) -> bool:
@@ -1537,6 +1556,23 @@ class MailManager:
                 )
                 or 360
             )
+            raw_token_mode = str(
+                payload.get("token_refresh_mode", self.settings.token_refresh_mode) or "expiry"
+            ).strip().lower()
+            self.settings.token_refresh_mode = raw_token_mode if raw_token_mode in {"expiry", "interval"} else "expiry"
+            self.settings.token_refresh_window_days = max(
+                1,
+                min(
+                    60,
+                    int(payload.get("token_refresh_window_days", self.settings.token_refresh_window_days) or 7),
+                ),
+            )
+            self.settings.token_refresh_include_unknown_expiry = bool(
+                payload.get(
+                    "token_refresh_include_unknown_expiry",
+                    self.settings.token_refresh_include_unknown_expiry,
+                )
+            )
             self.settings.backup_enabled = bool(
                 payload.get("backup_enabled", self.settings.backup_enabled)
             )
@@ -1655,6 +1691,9 @@ class MailManager:
             return settings_to_dict(self.settings)
 
     def open_mail(self, local_key: str) -> dict:
+        need_fetch_attachments = False
+        account_ref: Optional[MailAccount] = None
+        item_ref: Optional[MailItem] = None
         with self.lock:
             item = self.mail_items.get(local_key)
             if not item:
@@ -1677,12 +1716,33 @@ class MailManager:
                     status="正文已缓存",
                     size=size,
                 )
+                if item.has_attachments and not item.attachments:
+                    account_ref = self.find_account(item.account_email)
+                    item_ref = item
+                    need_fetch_attachments = account_ref is not None
             else:
                 account = self.find_account(item.account_email)
                 if account:
                     body_task = self.enqueue_body(account, item)
             self.log_event("info", "mail", "open", local_key, "打开邮件", {"source": item.source, "folder": item.folder})
-            return {"mail": self.serialize_mail(item), "body_task": asdict(body_task or BodyTask())}
+            result = {"mail": self.serialize_mail(item), "body_task": asdict(body_task or BodyTask())}
+
+        if need_fetch_attachments and account_ref is not None and item_ref is not None:
+            old_token = account_ref.token
+            try:
+                att_meta = fetch_mail_attachments_metadata(account_ref, item_ref)
+            except Exception:
+                att_meta = []
+            with self.lock:
+                live_item = self.mail_items.get(local_key)
+                if live_item and att_meta:
+                    live_item.attachments = att_meta
+                    live_item.has_attachments = True
+                    self.storage.upsert_mail_item(account_ref.email, live_item)
+                    result["mail"] = self.serialize_mail(live_item)
+                if account_ref.token != old_token:
+                    self._save_accounts_state()
+        return result
 
     def get_body_status(self, local_key: str) -> dict:
         with self.lock:
@@ -1705,12 +1765,15 @@ class MailManager:
             msg_id = item.msg_id
             folder = item.folder
             source = item.source
+            old_token = account.token
+        attachments_out: list[dict] = []
         body_html, status, size, duration = fetch_mail_body(
             account,
             msg_id,
             folder,
             source,
             mode="html",
+            attachments_out=attachments_out,
         )
         if status != "OK":
             self.log_event("error", "mail_body", "raw_load_failed", local_key, "原始正文加载失败", {"error": status, "source": source})
@@ -1720,20 +1783,255 @@ class MailManager:
             if not item:
                 raise ValueError("邮件不存在")
             item.body_html = body_html
+            if attachments_out:
+                item.attachments = attachments_out
+                item.has_attachments = True
             account = self.find_account(item.account_email)
             if account:
                 self.storage.upsert_mail_item(account.email, item)
+                if account.token != old_token:
+                    self._save_accounts_state()
             self.log_event("info", "mail_body", "raw_load_success", local_key, "原始正文加载成功", {"source": source, "size": size, "duration": duration})
             return {"mail": self.serialize_mail(item)}
 
-    def refresh_all_tokens(self, trigger_source: str = "manual") -> dict:
+    def download_attachment(self, local_key: str, attachment_id: str) -> tuple[bytes, str, str]:
+        with self.lock:
+            item = self.mail_items.get(local_key)
+            if not item:
+                raise ValueError("邮件不存在")
+            account = self.find_account(item.account_email)
+            if not account:
+                raise ValueError("邮箱账号不存在")
+            old_token = account.token
+        content, filename, content_type, status = download_mail_attachment(account, item, attachment_id)
+        if account.token != old_token:
+            with self.lock:
+                self._save_accounts_state()
+        if content is None or status != "OK":
+            raise ValueError(status or "附件下载失败")
+        return content, filename or "attachment", content_type or "application/octet-stream"
+
+    def download_all_attachments_zip(self, local_key: str) -> tuple[bytes, str]:
+        with self.lock:
+            item = self.mail_items.get(local_key)
+            if not item:
+                raise ValueError("邮件不存在")
+            account = self.find_account(item.account_email)
+            if not account:
+                raise ValueError("邮箱账号不存在")
+            old_token = account.token
+        files, status = download_all_mail_attachments(account, item)
+        if account.token != old_token:
+            with self.lock:
+                self._save_accounts_state()
+        if not files or status != "OK":
+            raise ValueError(status or "打包下载附件失败")
+        buf = io.BytesIO()
+        used_names: set[str] = set()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for raw_name, payload in files:
+                base_name = (raw_name or "attachment").replace("/", "_").replace("\\", "_").strip() or "attachment"
+                candidate = base_name
+                if candidate.lower() in used_names:
+                    stem, dot, ext = base_name.rpartition(".")
+                    counter = 2
+                    while True:
+                        candidate = f"{stem}_{counter}.{ext}" if dot and stem else f"{base_name}_{counter}"
+                        if candidate.lower() not in used_names:
+                            break
+                        counter += 1
+                used_names.add(candidate.lower())
+                archive.writestr(candidate, payload)
+        safe_subject = re.sub(r'[\\/:*?"<>|\r\n]+', "_", (item.subject or "attachments").strip())[:48].strip("._ ") or "attachments"
+        return buf.getvalue(), f"{safe_subject}-attachments.zip"
+
+    def delete_mails(self, local_keys: list[str]) -> dict:
+        keys = [str(k).strip() for k in local_keys if str(k).strip()]
+        if not keys:
+            raise ValueError("请先选择要删除的邮件")
+        by_account: dict[str, tuple[MailAccount, list[MailItem]]] = {}
+        missing: list[str] = []
+        with self.lock:
+            for key in keys:
+                item = self.mail_items.get(key)
+                if not item:
+                    missing.append(key)
+                    continue
+                account = self.find_account(item.account_email)
+                if not account:
+                    missing.append(key)
+                    continue
+                if account.email not in by_account:
+                    by_account[account.email] = (account, [])
+                by_account[account.email][1].append(item)
+
+        deleted_keys: list[str] = []
+        errors: list[dict[str, str]] = [{"local_key": k, "error": "邮件不存在"} for k in missing]
+        tokens_rotated = False
+
+        for account, items in by_account.values():
+            old_token = account.token
+            acc_deleted, acc_errors = delete_mails_remote(account, items)
+            deleted_keys.extend(acc_deleted)
+            errors.extend(acc_errors)
+            if account.token != old_token:
+                tokens_rotated = True
+
+        deleted_set = set(deleted_keys)
+        if deleted_set or tokens_rotated:
+            with self.lock:
+                if deleted_set:
+                    for account, _ in by_account.values():
+                        account.mails = [m for m in account.mails if m.local_key not in deleted_set]
+                        account.unseen_count = sum(1 for m in account.mails if m.is_unread)
+                    for key in deleted_set:
+                        self.mail_items.pop(key, None)
+                        self.body_tasks.pop(key, None)
+                        self.local_read_keys.discard(key)
+                    self.storage.delete_mail_items(list(deleted_set))
+                    self.storage.save_read_state(self.local_read_keys)
+                    self.rebuild_mail_pool()
+                self._save_accounts_state()
+                self.log_event(
+                    "info",
+                    "mail",
+                    "delete",
+                    f"{len(deleted_set)} mails",
+                    f"已删除 {len(deleted_set)} 封邮件",
+                    {"deleted_count": len(deleted_set), "failed_count": len(errors)},
+                )
+            self._emit_event("mail_deleted", {"deleted_keys": list(deleted_set)})
+
+        return {
+            "deleted_keys": list(deleted_set),
+            "deleted_count": len(deleted_set),
+            "failed_count": len(errors),
+            "errors": errors,
+        }
+
+    def mark_mails_read(self, local_keys: list[str], *, is_read: bool = True) -> dict:
+        keys = [str(k).strip() for k in local_keys if str(k).strip()]
+        if not keys:
+            raise ValueError("请先选择要操作的邮件")
+        by_account: dict[str, tuple[MailAccount, list[MailItem]]] = {}
+        updated_local: list[str] = []
+        with self.lock:
+            for key in keys:
+                item = self.mail_items.get(key)
+                if not item:
+                    continue
+                account = self.find_account(item.account_email)
+                if not account:
+                    continue
+                item.is_unread = not is_read
+                if is_read:
+                    self.local_read_keys.add(key)
+                else:
+                    self.local_read_keys.discard(key)
+                self.storage.upsert_mail_item(account.email, item)
+                updated_local.append(key)
+                if account.email not in by_account:
+                    by_account[account.email] = (account, [])
+                by_account[account.email][1].append(item)
+            for account, _ in by_account.values():
+                account.unseen_count = sum(1 for m in account.mails if m.is_unread)
+            if updated_local:
+                self.storage.save_read_state(self.local_read_keys)
+                self._save_accounts_state()
+
+        # Best-effort remote sync outside lock
+        remote_errors: list[dict[str, str]] = []
+        tokens_rotated = False
+        for account, items in by_account.values():
+            old_token = account.token
+            _, acc_errors = mark_mails_read_remote(account, items, is_read=is_read)
+            remote_errors.extend(acc_errors)
+            if account.token != old_token:
+                tokens_rotated = True
+        if tokens_rotated:
+            with self.lock:
+                self._save_accounts_state()
+        if updated_local:
+            self._emit_event("mail_updated", {"updated_keys": updated_local, "is_read": is_read})
+        return {
+            "updated_keys": updated_local,
+            "updated_count": len(updated_local),
+            "remote_failed_count": len(remote_errors),
+        }
+
+    def send_graph_mail(
+        self,
+        account_email: str,
+        recipients: list[str],
+        subject: str,
+        body: str,
+        *,
+        cc: Optional[list[str]] = None,
+    ) -> dict:
+        with self.lock:
+            account = self.find_account(account_email)
+            if not account:
+                raise ValueError("发件账号不存在")
+            old_token = account.token
+        result = send_mail_via_graph(account, recipients, subject, body, cc=cc)
+        if account.token != old_token:
+            with self.lock:
+                self._save_accounts_state()
+        self.log_event(
+            "info" if result.get("ok") else "warning",
+            "mail_send",
+            "graph_send_success" if result.get("ok") else "graph_send_failed",
+            account.email,
+            result.get("message", ""),
+            {
+                "code": result.get("code", ""),
+                "to_count": len(result.get("to", recipients)),
+                "cc_count": len(result.get("cc", cc or [])),
+                "subject": (subject or "")[:80],
+            },
+        )
+        return result
+
+    def _is_token_due_for_refresh(
+        self,
+        account: MailAccount,
+        window_days: int,
+        include_unknown_expiry: bool,
+    ) -> bool:
+        expires_raw = (account.token_expires_at or "").strip()
+        if not expires_raw:
+            return bool(include_unknown_expiry)
+        try:
+            expires_dt = dt.datetime.fromisoformat(expires_raw.replace(" ", "T"))
+        except Exception:
+            return bool(include_unknown_expiry)
+        threshold = self._now_shanghai() + dt.timedelta(days=max(1, window_days))
+        return expires_dt <= threshold
+
+    def refresh_all_tokens(
+        self,
+        trigger_source: str = "manual",
+        *,
+        only_expiring: bool = False,
+    ) -> dict:
         with self.lock:
             if self.token_refresh_running:
                 raise ValueError("Token 刷新任务正在执行")
             self.token_refresh_running = True
             # Token refresh is intentionally allowed for locked groups. The lock only
             # protects risky account changes such as move/delete/relogin/reauthorize.
-            accounts = [item for item in self.accounts if item.token and item.auth_code_or_client_id]
+            all_oauth = [item for item in self.accounts if item.token and item.auth_code_or_client_id]
+            window_days = max(1, min(60, int(self.settings.token_refresh_window_days or 7)))
+            include_unknown = bool(self.settings.token_refresh_include_unknown_expiry)
+            if only_expiring:
+                accounts = [
+                    item
+                    for item in all_oauth
+                    if self._is_token_due_for_refresh(item, window_days, include_unknown)
+                ]
+            else:
+                accounts = all_oauth
+            skipped_count = len(all_oauth) - len(accounts)
             locked_count = sum(1 for item in accounts if self._group_is_locked(item.group_name))
         self.log_event(
             "info",
@@ -1741,13 +2039,21 @@ class MailManager:
             "start",
             trigger_source,
             "开始刷新 Token",
-            {"count": len(accounts), "locked_group_count": locked_count},
+            {
+                "count": len(accounts),
+                "skipped_count": skipped_count,
+                "only_expiring": only_expiring,
+                "locked_group_count": locked_count,
+            },
         )
         try:
             results: list[dict] = []
             success_count = 0
+            rotated_count = 0
+            verified_unrotated_count = 0
             failed_count = 0
             for account in accounts:
+                old_token = (account.token or "").strip()
                 imap_token = None
                 imap_message = "跳过"
                 graph_token = None
@@ -1761,8 +2067,13 @@ class MailManager:
                     if not imap_token:
                         graph_token, graph_message = get_graph_access_token(account, force_refresh=True)
                 ok = bool(imap_token or graph_token)
+                rotated = ok and ((account.token or "").strip() != old_token)
                 if ok:
                     success_count += 1
+                    if rotated:
+                        rotated_count += 1
+                    else:
+                        verified_unrotated_count += 1
                 else:
                     failed_count += 1
                     self.log_event("error", "token_refresh", "account_failed", account.email, "Token 刷新失败", {"imap": imap_message, "graph": graph_message})
@@ -1770,6 +2081,7 @@ class MailManager:
                     {
                         "email": account.email,
                         "success": ok,
+                        "rotated": rotated,
                         "imap": imap_message,
                         "graph": graph_message,
                     }
@@ -1780,13 +2092,18 @@ class MailManager:
                 self._persist_scheduler_state()
             summary = {
                 "total": len(accounts),
+                "skipped_count": skipped_count,
+                "only_expiring": only_expiring,
                 "success_count": success_count,
+                "rotated_count": rotated_count,
+                "verified_unrotated_count": verified_unrotated_count,
                 "failed_count": failed_count,
                 "locked_group_count": locked_count,
                 "results": results,
             }
             self.storage.append_refresh_history(trigger_source, summary)
             self.log_event("info", "token_refresh", "complete", trigger_source, "Token 刷新完成", summary)
+            self._emit_event("account_updated", {"source": "token_refresh"})
             return summary
         finally:
             with self.lock:
@@ -2041,12 +2358,15 @@ class MailManager:
                 with self.lock:
                     settings = self.settings
                     accounts = self.accounts.copy()
-                if (
-                    settings.token_refresh_enabled
-                    and settings.token_refresh_interval_minutes > 0
-                    and now - self.last_token_refresh_run_at >= settings.token_refresh_interval_minutes * 60
-                ):
-                    self.refresh_all_tokens(trigger_source="scheduled")
+                if settings.token_refresh_enabled:
+                    if settings.token_refresh_mode == "expiry":
+                        if now - self.last_token_refresh_run_at >= 24 * 3600:
+                            self.refresh_all_tokens(trigger_source="scheduled_expiry", only_expiring=True)
+                    elif (
+                        settings.token_refresh_interval_minutes > 0
+                        and now - self.last_token_refresh_run_at >= settings.token_refresh_interval_minutes * 60
+                    ):
+                        self.refresh_all_tokens(trigger_source="scheduled", only_expiring=False)
                 if settings.auto_receive_enabled:
                     group_names = ["未分组", *[item.name for item in settings.custom_groups]]
                     accounts_by_group: dict[str, list[MailAccount]] = {}
@@ -2247,6 +2567,8 @@ class MailManager:
                         task.speed_kb_s = speed_kb_s
                         task.status = "正在下载正文"
 
+                old_token = account.token
+                attachments_out: list[dict] = []
                 body, status, size, duration = fetch_mail_body(
                     account,
                     item.msg_id,
@@ -2254,6 +2576,7 @@ class MailManager:
                     item.source,
                     progress_callback=progress_callback,
                     mode="text",
+                    attachments_out=attachments_out,
                 )
                 with self.lock:
                     task = self.body_tasks.setdefault(item.local_key, BodyTask())
@@ -2262,17 +2585,24 @@ class MailManager:
                     task.status = status
                     if status == "OK":
                         item.body_text = body
+                        if attachments_out:
+                            item.attachments = attachments_out
+                            item.has_attachments = True
                         codes_changed = self.refresh_verification_codes(item)
                         task.state = "done"
                         task.downloaded = size
                         task.total = size
                         task.status = "正文已缓存"
                         self.storage.upsert_mail_item(account.email, item)
+                        if account.token != old_token:
+                            self._save_accounts_state()
                         self.log_event("info", "mail_body", "load_success", item.local_key, "邮件正文加载成功", {"source": item.source, "size": size})
                         if codes_changed and item.verification_codes:
                             self.log_event("info", "verification", "extract_body", item.local_key, "验证码正文提取完成", {"codes": len(item.verification_codes)})
                     else:
                         task.state = "error"
+                        if account.token != old_token:
+                            self._save_accounts_state()
                         self.log_event("error", "mail_body", "load_failed", item.local_key, "邮件正文加载失败", {"error": status, "source": item.source})
             except Exception as exc:
                 with self.lock:

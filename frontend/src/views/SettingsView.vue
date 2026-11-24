@@ -408,19 +408,54 @@
               <input v-model="form.startup_auto_login" type="checkbox" />
               后端启动后仅对未登录或失败的账号自动登录（已登录账号自动保留登录态）
             </label>
-            <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-dark-300">
+            <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-dark-300 md:col-span-2">
               <input v-model="form.token_refresh_enabled" type="checkbox" />
-              启用定时 Token 刷新
+              启用定时 Token 保活刷新
             </label>
             <label class="space-y-2">
+              <span class="input-label mb-0">刷新策略</span>
+              <select v-model="form.token_refresh_mode" class="input text-sm">
+                <option value="expiry">按到期窗口每日检查（推荐）</option>
+                <option value="interval">固定周期全量刷新</option>
+              </select>
+              <span class="input-hint block">
+                {{
+                  form.token_refresh_mode === 'expiry'
+                    ? '每天检查预计临近到期的 OAuth 账号；若微软未下发新令牌则保留原到期锚点，次日自动继续尝试。'
+                    : '每隔固定分钟数对全部 OAuth 账号执行一次刷新。'
+                }}
+              </span>
+            </label>
+            <label v-if="form.token_refresh_mode === 'expiry'" class="space-y-2">
+              <span class="input-label mb-0">提前刷新窗口（天）</span>
+              <input
+                v-model.number="form.token_refresh_window_days"
+                class="input"
+                type="number"
+                min="1"
+                max="60"
+              />
+              <span class="input-hint block">距离预计到期 ≤ 该天数的账号将进入每日刷新队列（默认 7 天）。</span>
+            </label>
+            <label v-else class="space-y-2">
               <span class="input-label mb-0">Token 刷新间隔（分钟）</span>
               <input v-model.number="form.token_refresh_interval_minutes" class="input" type="number" min="5" />
+            </label>
+            <label
+              v-if="form.token_refresh_mode === 'expiry'"
+              class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-dark-300 md:col-span-2"
+            >
+              <input v-model="form.token_refresh_include_unknown_expiry" type="checkbox" />
+              到期时间未知的存量账号也纳入每日到期刷新检查
             </label>
           </div>
 
           <div class="card-footer space-y-4">
             <div class="flex flex-wrap gap-3">
-              <button class="btn btn-secondary" :disabled="runningTokenRefresh" @click="handleRunTokenRefresh">
+              <button class="btn btn-primary btn-sm" :disabled="runningTokenRefresh" @click="handleRunTokenRefresh(true)">
+                {{ runningTokenRefresh ? '执行中...' : '立即检查到期窗口账号' }}
+              </button>
+              <button class="btn btn-secondary btn-sm" :disabled="runningTokenRefresh" @click="handleRunTokenRefresh(false)">
                 {{ runningTokenRefresh ? '执行中...' : '立即全量刷新 Token' }}
               </button>
             </div>
@@ -436,8 +471,22 @@
                     <span class="font-medium text-gray-900 dark:text-white">{{ item.created_at }}</span>
                     <span class="text-gray-500 dark:text-dark-400">{{ item.trigger_source }}</span>
                   </div>
-                  <div class="mt-1 text-gray-500 dark:text-dark-400">
-                    成功 {{ item.payload.success_count || 0 }} / 失败 {{ item.payload.failed_count || 0 }}
+                  <div class="mt-1 flex flex-wrap items-center gap-2 text-gray-500 dark:text-dark-400">
+                    <span class="text-emerald-600 dark:text-emerald-400">
+                      已轮换 {{ item.payload.rotated_count ?? 0 }}
+                    </span>
+                    <span>·</span>
+                    <span>
+                      未轮换成功 {{ item.payload.verified_unrotated_count ?? item.payload.success_count ?? 0 }}
+                    </span>
+                    <span>·</span>
+                    <span :class="(item.payload.failed_count || 0) > 0 ? 'text-red-500 dark:text-red-400' : ''">
+                      失败 {{ item.payload.failed_count || 0 }}
+                    </span>
+                    <template v-if="item.payload.skipped_count">
+                      <span>·</span>
+                      <span>跳过未到期 {{ item.payload.skipped_count }}</span>
+                    </template>
                   </div>
                 </div>
                 <div v-if="!tokenRefreshHistory.length" class="text-xs text-gray-500 dark:text-dark-400">
@@ -867,6 +916,9 @@ const form = reactive<AppSettings>({
   auto_receive_incremental: true,
   token_refresh_enabled: false,
   token_refresh_interval_minutes: 360,
+  token_refresh_mode: 'expiry',
+  token_refresh_window_days: 7,
+  token_refresh_include_unknown_expiry: true,
   backup_enabled: false,
   backup_interval_minutes: 1440,
   backup_directory: 'backups',
@@ -1261,10 +1313,10 @@ async function loadTokenRefreshHistory() {
   }
 }
 
-async function handleRunTokenRefresh() {
+async function handleRunTokenRefresh(onlyExpiring = false) {
   runningTokenRefresh.value = true
   try {
-    const response = await runTokenRefresh()
+    const response = await runTokenRefresh(onlyExpiring)
     toastStore.push(response.message, 'success')
     await loadTokenRefreshHistory()
   } catch (error: any) {

@@ -26,6 +26,8 @@ class MailItem:
     body_text: str = ""
     body_html: str = ""
     verification_codes: list[dict] = field(default_factory=list)
+    has_attachments: bool = False
+    attachments: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -46,6 +48,11 @@ class MailAccount:
     cached_access_expire_at: float = 0.0
     cached_graph_access_token: str = ""
     cached_graph_access_expire_at: float = 0.0
+    cached_graph_scope: str = ""
+    last_token_refresh_at: str = ""
+    last_token_success_at: str = ""
+    last_token_rotated_at: str = ""
+    token_expires_at: str = ""
     flag_color: str = ""
     group_name: str = "未分组"
     tags: list[str] = field(default_factory=list)
@@ -87,6 +94,9 @@ class AppSettings:
     auto_receive_incremental: bool = True
     token_refresh_enabled: bool = False
     token_refresh_interval_minutes: int = 360
+    token_refresh_mode: str = "expiry"
+    token_refresh_window_days: int = 7
+    token_refresh_include_unknown_expiry: bool = True
     backup_enabled: bool = False
     backup_interval_minutes: int = 1440
     backup_directory: str = "backups"
@@ -139,6 +149,8 @@ def mail_item_to_dict(m: MailItem) -> dict:
         "body_text": m.body_text,
         "body_html": m.body_html,
         "verification_codes": m.verification_codes,
+        "has_attachments": bool(m.has_attachments or bool(m.attachments)),
+        "attachments": m.attachments,
     }
 
 
@@ -153,6 +165,7 @@ def mail_item_from_dict(data: dict) -> Optional[MailItem]:
             if date_str
             else dt.datetime(1970, 1, 1)
         )
+        attachments = [item for item in data.get("attachments", []) if isinstance(item, dict)]
         return MailItem(
             account_email=str(data.get("account_email", "")),
             msg_id=msg_id_str.encode(),
@@ -168,6 +181,8 @@ def mail_item_from_dict(data: dict) -> Optional[MailItem]:
             body_text=str(data.get("body_text", "")),
             body_html=str(data.get("body_html", "")),
             verification_codes=[item for item in data.get("verification_codes", []) if isinstance(item, dict)],
+            has_attachments=bool(data.get("has_attachments", False) or bool(attachments)),
+            attachments=attachments,
         )
     except Exception:
         return None
@@ -193,6 +208,11 @@ def account_to_dict(a: MailAccount) -> dict:
         "cached_access_expire_at": a.cached_access_expire_at,
         "cached_graph_access_token": a.cached_graph_access_token,
         "cached_graph_access_expire_at": a.cached_graph_access_expire_at,
+        "cached_graph_scope": a.cached_graph_scope,
+        "last_token_refresh_at": a.last_token_refresh_at,
+        "last_token_success_at": a.last_token_success_at,
+        "last_token_rotated_at": a.last_token_rotated_at,
+        "token_expires_at": a.token_expires_at,
         "flag_color": a.flag_color,
         "group_name": a.group_name,
         "tags": a.tags,
@@ -240,6 +260,11 @@ def account_from_dict(data: dict) -> Optional[MailAccount]:
         cached_access_expire_at=float(data.get("cached_access_expire_at", 0.0) or 0.0),
         cached_graph_access_token=cached_graph,
         cached_graph_access_expire_at=float(data.get("cached_graph_access_expire_at", 0.0) or 0.0),
+        cached_graph_scope=str(data.get("cached_graph_scope", "") or ""),
+        last_token_refresh_at=str(data.get("last_token_refresh_at", "") or ""),
+        last_token_success_at=str(data.get("last_token_success_at", "") or ""),
+        last_token_rotated_at=str(data.get("last_token_rotated_at", "") or ""),
+        token_expires_at=str(data.get("token_expires_at", "") or ""),
         flag_color=str(data.get("flag_color", "")),
         group_name=str(data.get("group_name", "未分组") or "未分组"),
         tags=[str(item) for item in data.get("tags", []) if str(item).strip()],
@@ -271,6 +296,9 @@ def settings_to_dict(settings: AppSettings) -> dict:
         "auto_receive_incremental": settings.auto_receive_incremental,
         "token_refresh_enabled": settings.token_refresh_enabled,
         "token_refresh_interval_minutes": settings.token_refresh_interval_minutes,
+        "token_refresh_mode": settings.token_refresh_mode if settings.token_refresh_mode in {"expiry", "interval"} else "expiry",
+        "token_refresh_window_days": max(1, min(60, int(settings.token_refresh_window_days or 7))),
+        "token_refresh_include_unknown_expiry": bool(settings.token_refresh_include_unknown_expiry),
         "backup_enabled": settings.backup_enabled,
         "backup_interval_minutes": settings.backup_interval_minutes,
         "backup_directory": settings.backup_directory,
@@ -409,6 +437,13 @@ def settings_from_dict(data: dict) -> AppSettings:
         auto_receive_incremental=bool(data.get("auto_receive_incremental", True)),
         token_refresh_enabled=bool(data.get("token_refresh_enabled", False)),
         token_refresh_interval_minutes=int(data.get("token_refresh_interval_minutes", 360) or 360),
+        token_refresh_mode=(
+            str(data.get("token_refresh_mode", "expiry") or "expiry").strip().lower()
+            if str(data.get("token_refresh_mode", "expiry") or "expiry").strip().lower() in {"expiry", "interval"}
+            else "expiry"
+        ),
+        token_refresh_window_days=max(1, min(60, int(data.get("token_refresh_window_days", 7) or 7))),
+        token_refresh_include_unknown_expiry=bool(data.get("token_refresh_include_unknown_expiry", True)),
         backup_enabled=bool(data.get("backup_enabled", False)),
         backup_interval_minutes=int(data.get("backup_interval_minutes", 1440) or 1440),
         backup_directory=str(data.get("backup_directory", "backups") or "backups"),

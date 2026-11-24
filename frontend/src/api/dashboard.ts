@@ -273,6 +273,65 @@ export async function loadRawMailBody(localKey: string) {
   return data
 }
 
+export async function downloadMailAttachment(localKey: string, attachmentId: string) {
+  return apiClient.get('/mails/attachments/download', {
+    params: {
+      local_key: localKey,
+      attachment_id: attachmentId,
+    },
+    responseType: 'blob',
+  })
+}
+
+export async function downloadAllMailAttachments(localKey: string) {
+  return apiClient.get('/mails/attachments/download-all', {
+    params: {
+      local_key: localKey,
+    },
+    responseType: 'blob',
+  })
+}
+
+export async function deleteMails(localKeys: string[]) {
+  const { data } = await apiClient.post<
+    ApiResponse<{
+      deleted_keys: string[]
+      deleted_count: number
+      failed_count: number
+      errors: Array<{ local_key: string; error: string }>
+    }>
+  >('/mails/delete', { local_keys: localKeys })
+  return data
+}
+
+export async function markMailsRead(localKeys: string[], isRead = true) {
+  const { data } = await apiClient.post<
+    ApiResponse<{
+      updated_keys: string[]
+      updated_count: number
+      remote_failed_count: number
+    }>
+  >('/mails/mark-read', { local_keys: localKeys, is_read: isRead })
+  return data
+}
+
+export async function sendGraphMail(payload: {
+  account_email: string
+  recipients: string[]
+  cc?: string[]
+  subject: string
+  body: string
+}) {
+  const { data } = await apiClient.post<
+    ApiResponse<{
+      submitted: boolean
+      to: string[]
+      cc: string[]
+    }>
+  >('/mails/send', payload, { timeout: 45000 })
+  return data
+}
+
 export async function getSettings() {
   const { data } = await apiClient.get<ApiResponse<AppSettings>>('/settings')
   return data
@@ -322,20 +381,25 @@ export async function testTranslateService(payload?: {
   return data
 }
 
-export async function runTokenRefresh() {
+export async function runTokenRefresh(onlyExpiring = false) {
   const { data } = await apiClient.post<
     ApiResponse<{
       total: number
+      skipped_count?: number
+      only_expiring?: boolean
       success_count: number
+      rotated_count?: number
+      verified_unrotated_count?: number
       failed_count: number
       results: Array<{
         email: string
         success: boolean
+        rotated?: boolean
         imap: string
         graph: string
       }>
     }>
-  >('/token-refresh/run')
+  >('/token-refresh/run', { only_expiring: onlyExpiring })
   return data
 }
 

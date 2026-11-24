@@ -30,12 +30,19 @@ from pydantic import BaseModel, Field
 
 from .auth import create_access_token, get_current_user, security
 from .config import config, update_admin_credentials
+from .imap_logic import TOKEN_ROTATION_ESTIMATED_DAYS, format_shanghai_time
 from .manager import MailManager
 from .models import DEFAULT_IMPORT_DELIMITERS, MailAccount
 from .storage import SqliteStorage
 from .translate import get_public_translate_providers, translate_text_to_chinese
 
-GRAPH_REAUTH_SCOPE = "offline_access openid profile https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read"
+GRAPH_REAUTH_SCOPE = (
+    "offline_access openid profile "
+    "https://graph.microsoft.com/User.Read "
+    "https://graph.microsoft.com/Mail.Read "
+    "https://graph.microsoft.com/Mail.ReadWrite "
+    "https://graph.microsoft.com/Mail.Send"
+)
 MANUAL_OAUTH_SCOPE = GRAPH_REAUTH_SCOPE
 MICROSOFT_CONSUMERS_BASE_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0"
 PROJECT_REPO = "vivibudong/EasyMail"
@@ -278,6 +285,27 @@ class MailStarRequest(BaseModel):
     is_starred: Optional[bool] = None
 
 
+class MailBatchKeysRequest(BaseModel):
+    local_keys: list[str] = Field(default_factory=list)
+
+
+class MailMarkReadRequest(BaseModel):
+    local_keys: list[str] = Field(default_factory=list)
+    is_read: bool = True
+
+
+class MailSendRequest(BaseModel):
+    account_email: str
+    recipients: list[str] = Field(default_factory=list)
+    cc: list[str] = Field(default_factory=list)
+    subject: str = ""
+    body: str = ""
+
+
+class TokenRefreshRunRequest(BaseModel):
+    only_expiring: bool = False
+
+
 class TranslateRequest(BaseModel):
     text: str
 
@@ -376,6 +404,9 @@ class SettingsRequest(BaseModel):
     auto_receive_incremental: bool = True
     token_refresh_enabled: bool = False
     token_refresh_interval_minutes: int = 360
+    token_refresh_mode: str = "expiry"
+    token_refresh_window_days: int = 7
+    token_refresh_include_unknown_expiry: bool = True
     backup_enabled: bool = False
     backup_interval_minutes: int = 1440
     backup_directory: str = "backups"
@@ -816,6 +847,13 @@ def _apply_graph_reauth_success(session: GraphReauthSession, token_payload: dict
         account.cached_access_expire_at = 0.0
         account.cached_graph_access_token = ""
         account.cached_graph_access_expire_at = 0.0
+        account.cached_graph_scope = ""
+        now_dt = manager._now_shanghai()
+        now_text = format_shanghai_time(now_dt)
+        account.last_token_refresh_at = now_text
+        account.last_token_success_at = now_text
+        account.last_token_rotated_at = now_text
+        account.token_expires_at = format_shanghai_time(now_dt + dt.timedelta(days=TOKEN_ROTATION_ESTIMATED_DAYS))
         account.last_error = ""
         account.status = "待登录"
         manager._save_accounts_state()
@@ -1533,14 +1571,27 @@ def complete_manual_oauth(
             existing.cached_access_expire_at = 0.0
             existing.cached_graph_access_token = ""
             existing.cached_graph_access_expire_at = 0.0
+            existing.cached_graph_scope = ""
+            now_dt = manager._now_shanghai()
+            now_text = format_shanghai_time(now_dt)
+            existing.last_token_refresh_at = now_text
+            existing.last_token_success_at = now_text
+            existing.last_token_rotated_at = now_text
+            existing.token_expires_at = format_shanghai_time(now_dt + dt.timedelta(days=TOKEN_ROTATION_ESTIMATED_DAYS))
             target = existing
         else:
+            now_dt = manager._now_shanghai()
+            now_text = format_shanghai_time(now_dt)
             target = MailAccount(
                 email=actual_email,
                 password=str(session["password"] or ""),
                 auth_code_or_client_id=str(session["client_id"]),
                 token=refresh_token,
                 status="待登录",
+                last_token_refresh_at=now_text,
+                last_token_success_at=now_text,
+                last_token_rotated_at=now_text,
+                token_expires_at=format_shanghai_time(now_dt + dt.timedelta(days=TOKEN_ROTATION_ESTIMATED_DAYS)),
             )
             manager.accounts.append(target)
         manager._save_accounts_state()
@@ -1586,12 +1637,23 @@ def update_settings(
 
 
 @app.post("/api/token-refresh/run")
-def run_token_refresh(current_user: dict = Depends(get_current_user)) -> dict:
+def run_token_refresh(
+    payload: Optional[TokenRefreshRunRequest] = None,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    only_expiring = bool(payload.only_expiring) if payload else False
     try:
-        result = manager.refresh_all_tokens()
+        result = manager.refresh_all_tokens(
+            trigger_source="manual_expiry" if only_expiring else "manual",
+            only_expiring=only_expiring,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ok("Token 全量刷新已完成", result)
+    rotated = result.get("rotated_count", 0)
+    unrotated = result.get("verified_unrotated_count", 0)
+    failed = result.get("failed_count", 0)
+    prefix = "到期窗口 Token 刷新完成" if only_expiring else "Token 全量刷新完成"
+    return ok(f"{prefix}：已轮换 {rotated}，未轮换成功 {unrotated}，失败 {failed}", result)
 
 
 @app.get("/api/token-refresh/history")
@@ -1802,6 +1864,113 @@ def toggle_mail_star(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ok("星标状态已更新", {"is_starred": state})
+
+
+def _build_content_disposition(filename: str) -> str:
+    clean = re.sub(r'[\r\n"\\]+', "_", (filename or "attachment").strip()) or "attachment"
+    ascii_fallback = re.sub(r"[^\x20-\x7e]+", "_", clean).strip() or "attachment"
+    encoded = urllib.parse.quote(clean, safe="")
+    return f'attachment; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded}'
+
+
+@app.get("/api/mails/attachments/download")
+def download_mail_attachment_api(
+    local_key: str = Query(...),
+    attachment_id: str = Query(...),
+    current_user: dict = Depends(get_current_user),
+) -> Response:
+    try:
+        content, filename, content_type = manager.download_attachment(local_key, attachment_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(
+        content=content,
+        media_type=content_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": _build_content_disposition(filename),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.get("/api/mails/attachments/download-all")
+def download_all_mail_attachments_api(
+    local_key: str = Query(...),
+    current_user: dict = Depends(get_current_user),
+) -> Response:
+    try:
+        zip_bytes, filename = manager.download_all_attachments_zip(local_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": _build_content_disposition(filename),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.post("/api/mails/delete")
+def delete_mails_api(
+    payload: MailBatchKeysRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    try:
+        result = manager.delete_mails(payload.local_keys)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result["deleted_count"] == 0 and result["errors"]:
+        first_err = result["errors"][0].get("error", "邮件删除失败")
+        raise HTTPException(status_code=400, detail=first_err)
+    msg = (
+        f"已删除 {result['deleted_count']} 封邮件"
+        if result["failed_count"] == 0
+        else f"已删除 {result['deleted_count']} 封，失败 {result['failed_count']} 封"
+    )
+    return ok(msg, result)
+
+
+@app.post("/api/mails/mark-read")
+def mark_mails_read_api(
+    payload: MailMarkReadRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    try:
+        result = manager.mark_mails_read(payload.local_keys, is_read=payload.is_read)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    action = "已读" if payload.is_read else "未读"
+    return ok(f"已将 {result['updated_count']} 封邮件标记为{action}", result)
+
+
+@app.post("/api/mails/send")
+def send_mail_api(
+    payload: MailSendRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    try:
+        result = manager.send_graph_mail(
+            payload.account_email,
+            payload.recipients,
+            payload.subject,
+            payload.body,
+            cc=payload.cc,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=int(result.get("status_code") or 400),
+            detail={
+                "message": result.get("message", "邮件发送失败"),
+                "code": result.get("code", "GRAPH_SEND_FAILED"),
+                "reauth_required": bool(result.get("reauth_required", False)),
+                "retry_after": result.get("retry_after"),
+            },
+        )
+    return ok(result.get("message", "邮件已提交发送"), result)
 
 
 @app.get("/api/v1/overview")

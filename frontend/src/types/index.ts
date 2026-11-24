@@ -55,6 +55,20 @@ export interface MailAccountSummary {
   auth_method: string
   flag_color: string
   mail_count: number
+  last_token_refresh_at?: string
+  last_token_success_at?: string
+  last_token_rotated_at?: string
+  token_expires_at?: string
+  can_send_graph?: boolean
+}
+
+export interface MailAttachment {
+  id: string
+  name: string
+  content_type: string
+  size: number
+  is_inline: boolean
+  content_id?: string
 }
 
 export interface MailItem {
@@ -73,6 +87,8 @@ export interface MailItem {
   body_text: string
   body_html: string
   verification_codes: VerificationCode[]
+  has_attachments?: boolean
+  attachments?: MailAttachment[]
 }
 
 export interface VerificationCode {
@@ -118,6 +134,9 @@ export interface AppSettings {
   auto_receive_incremental: boolean
   token_refresh_enabled: boolean
   token_refresh_interval_minutes: number
+  token_refresh_mode: 'expiry' | 'interval'
+  token_refresh_window_days: number
+  token_refresh_include_unknown_expiry: boolean
   backup_enabled: boolean
   backup_interval_minutes: number
   backup_directory: string

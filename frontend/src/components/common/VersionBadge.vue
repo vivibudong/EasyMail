@@ -6,7 +6,7 @@
       @click.stop="dropdownOpen = !dropdownOpen"
     >
       <span class="h-1.5 w-1.5 rounded-full" :class="dotClass" />
-      <span class="text-[11px] font-semibold leading-none">v{{ versionInfo?.current_version || '0.1.10' }}</span>
+      <span class="text-[11px] font-semibold leading-none">v{{ versionInfo?.current_version || '0.1.11' }}</span>
       <span v-if="checking" class="text-[10px] opacity-70">...</span>
     </button>
 
@@ -36,13 +36,13 @@
             <div class="rounded-xl bg-gray-50 px-3 py-2 dark:bg-dark-700/50">
               <div class="text-gray-500 dark:text-dark-400">当前版本</div>
               <div class="mt-1 font-semibold text-gray-900 dark:text-white">
-                v{{ versionInfo?.current_version || '0.1.10' }}
+                v{{ versionInfo?.current_version || '0.1.11' }}
               </div>
             </div>
             <div class="rounded-xl bg-gray-50 px-3 py-2 dark:bg-dark-700/50">
               <div class="text-gray-500 dark:text-dark-400">最新版本</div>
               <div class="mt-1 font-semibold text-gray-900 dark:text-white">
-                v{{ versionInfo?.latest_version || versionInfo?.current_version || '0.1.10' }}
+                v{{ versionInfo?.latest_version || versionInfo?.current_version || '0.1.11' }}
               </div>
             </div>
           </div>

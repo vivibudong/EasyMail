@@ -293,13 +293,53 @@
 
             <section class="mail-pane border-r border-gray-100 dark:border-dark-800">
               <div class="pane-toolbar">
-                <div>
+                <div class="min-w-0">
                   <div class="text-sm font-semibold text-gray-900 dark:text-white">邮件列表</div>
                   <div class="text-[11px] text-gray-500 dark:text-dark-400">
                     {{ visibleMailsAll.length }} 封
                   </div>
                 </div>
-                <button class="btn btn-secondary btn-sm px-2 py-1" @click="refreshState()">刷新</button>
+                <div class="flex items-center gap-1.5">
+                  <button
+                    v-if="selectedAccount?.can_send_graph"
+                    class="btn btn-primary btn-sm px-2.5 py-1"
+                    @click="openComposeModal(selectedAccount.email)"
+                  >
+                    写邮件
+                  </button>
+                  <button class="btn btn-secondary btn-sm px-2 py-1" @click="refreshState()">刷新</button>
+                </div>
+              </div>
+
+              <div
+                v-if="checkedMailKeys.length > 0"
+                class="flex flex-wrap items-center justify-between gap-2 border-b border-primary-100 bg-primary-50/70 px-3 py-1.5 text-[11px] dark:border-primary-900/40 dark:bg-primary-900/15"
+              >
+                <div class="flex items-center gap-2 font-medium text-primary-700 dark:text-primary-300">
+                  <span>已选 {{ checkedMailKeys.length }} 封</span>
+                  <button class="underline hover:opacity-80" @click="toggleSelectAllPageMails">
+                    {{ allPageMailsChecked ? '取消全选本页' : '全选本页' }}
+                  </button>
+                  <button class="text-gray-500 hover:text-gray-700 dark:text-dark-400" @click="checkedMailKeys = []">
+                    清空
+                  </button>
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <button
+                    class="btn btn-secondary btn-sm px-2 py-0.5 text-[11px]"
+                    :disabled="markingMailsRead"
+                    @click="handleMarkCheckedMailsRead(true)"
+                  >
+                    {{ markingMailsRead ? '处理中...' : '设为已读' }}
+                  </button>
+                  <button
+                    class="btn btn-danger btn-sm px-2 py-0.5 text-[11px]"
+                    :disabled="deletingMails"
+                    @click="confirmDeleteMails(checkedMailKeys)"
+                  >
+                    {{ deletingMails ? '删除中...' : '删除' }}
+                  </button>
+                </div>
               </div>
 
               <div ref="mailListRef" class="pane-scroll overflow-hidden space-y-3">
@@ -307,10 +347,10 @@
                   <div class="mb-1 px-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400">
                     {{ group.label }}
                   </div>
-                  <button
+                  <div
                     v-for="mail in group.items"
                     :key="mail.local_key"
-                    class="mail-row"
+                    class="mail-row cursor-pointer"
                     :class="{
                       'mail-row-unread': mail.is_unread,
                       'mail-row-active': selectedMailKey === mail.local_key,
@@ -318,6 +358,13 @@
                     @click="handleOpenMail(mail)"
                   >
                     <div class="flex items-start gap-2">
+                      <input
+                        type="checkbox"
+                        class="mt-1 shrink-0"
+                        :checked="checkedMailKeys.includes(mail.local_key)"
+                        @click.stop
+                        @change="toggleMailChecked(mail.local_key, ($event.target as HTMLInputElement).checked)"
+                      />
                       <button
                         class="mt-[1px] text-sm leading-none transition-colors"
                         :class="mail.is_starred ? 'text-amber-400' : 'text-gray-300 hover:text-amber-300'"
@@ -326,15 +373,24 @@
                         {{ mail.is_starred ? '★' : '☆' }}
                       </button>
                       <div class="min-w-0 flex-1">
-                        <div
-                          class="truncate text-[12px]"
-                          :class="
-                            mail.is_unread
-                              ? 'font-semibold text-gray-900 dark:text-white'
-                              : 'text-gray-600 dark:text-dark-300'
-                          "
-                        >
-                          {{ mail.subject }}
+                        <div class="flex items-center gap-1.5">
+                          <div
+                            class="min-w-0 flex-1 truncate text-[12px]"
+                            :class="
+                              mail.is_unread
+                                ? 'font-semibold text-gray-900 dark:text-white'
+                                : 'text-gray-600 dark:text-dark-300'
+                            "
+                          >
+                            {{ mail.subject }}
+                          </div>
+                          <span
+                            v-if="mail.has_attachments"
+                            class="shrink-0 rounded bg-sky-50 px-1 py-0 text-[10px] text-sky-600 dark:bg-sky-900/30 dark:text-sky-300"
+                            title="包含附件"
+                          >
+                            📎
+                          </span>
                         </div>
                         <div class="mt-0.5 flex items-center gap-1.5 truncate text-[10px] text-gray-500 dark:text-dark-400">
                           <span class="badge px-2 py-0" :class="folderBadgeClass(mail.folder)">{{ mail.folder }}</span>
@@ -363,7 +419,7 @@
                         class="mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-primary-500"
                       ></span>
                     </div>
-                  </button>
+                  </div>
                 </div>
 
                 <div
@@ -445,6 +501,14 @@
                   >
                     刷新正文
                   </button>
+                  <button
+                    v-if="selectedMailDetail"
+                    class="btn btn-ghost btn-sm px-2 py-1 text-red-500 hover:bg-red-50 hover:text-red-600 dark:text-red-400 dark:hover:bg-red-900/20"
+                    :disabled="deletingMails"
+                    @click="confirmDeleteMails([selectedMailDetail.local_key])"
+                  >
+                    删除
+                  </button>
                 </div>
               </div>
 
@@ -479,25 +543,101 @@
               </div>
 
               <div class="pane-scroll">
-                <div
-                  v-if="!selectedMailDetail"
-                  class="empty-state rounded-2xl border border-dashed border-gray-200 py-10 dark:border-dark-700"
-                >
-                  <Icon name="mail" size="lg" class="empty-state-icon" />
-                  <div class="empty-state-title text-sm">请选择一封邮件</div>
-                  <div class="empty-state-description text-xs">正文将被后台下载并写入本地缓存。</div>
-                </div>
-                <div v-else-if="showingRawBody" class="mail-body mail-html-body">
+                <transition name="mail-detail-fade" mode="out-in">
                   <div
-                    v-if="hasBlockedRemoteImages && !allowRemoteImages"
-                    class="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-800/60 dark:bg-amber-900/10 dark:text-amber-300"
+                    v-if="!selectedMailDetail && !openingMail"
+                    key="mail-empty"
+                    class="empty-state rounded-2xl border border-dashed border-gray-200 py-10 dark:border-dark-700"
                   >
-                    邮件包含远程图片，已默认拦截。
-                    <button class="ml-2 font-semibold underline" @click="allowRemoteImages = true">加载远程图片</button>
+                    <Icon name="mail" size="lg" class="empty-state-icon" />
+                    <div class="empty-state-title text-sm">请选择一封邮件</div>
+                    <div class="empty-state-description text-xs">正文将被后台下载并写入本地缓存。</div>
                   </div>
-                  <iframe class="mail-html-frame" sandbox="allow-popups allow-popups-to-escape-sandbox" :srcdoc="displayedRawHtml"></iframe>
-                </div>
-                <pre v-else class="mail-body">{{ displayedMailBody }}</pre>
+
+                  <div
+                    v-else-if="isMailBodyLoading"
+                    :key="`mail-loading-${selectedMailKey}`"
+                    class="rounded-xl bg-gray-50/50 p-4 dark:bg-dark-800/40"
+                  >
+                    <div class="mb-4 flex items-center gap-2 text-xs text-primary-600 dark:text-primary-400">
+                      <span class="spinner h-3.5 w-3.5"></span>
+                      <span>{{ openingMail ? '正在切换并加载邮件...' : bodyStatusText || '正在下载正文...' }}</span>
+                    </div>
+                    <div class="space-y-2.5">
+                      <div class="mail-skeleton-line h-4 w-3/5"></div>
+                      <div class="mail-skeleton-line h-3 w-11/12"></div>
+                      <div class="mail-skeleton-line h-3 w-full"></div>
+                      <div class="mail-skeleton-line h-3 w-4/5"></div>
+                      <div class="mail-skeleton-line h-3 w-2/3"></div>
+                    </div>
+                  </div>
+
+                  <div
+                    v-else-if="selectedMailDetail"
+                    :key="`mail-content-${selectedMailDetail.local_key}-${showingRawBody ? 'html' : 'text'}`"
+                    class="flex h-full min-h-0 flex-col"
+                  >
+                    <div
+                      v-if="selectedMailDetail.attachments?.length"
+                      class="mail-attachments-box shrink-0"
+                    >
+                      <div class="mb-2 flex items-center justify-between gap-2">
+                        <div class="flex items-center gap-1.5 text-xs font-semibold text-gray-800 dark:text-dark-100">
+                          <span>📎 附件</span>
+                          <span class="rounded-full bg-gray-200/80 px-1.5 py-0 text-[10px] text-gray-600 dark:bg-dark-700 dark:text-dark-300">
+                            {{ selectedMailDetail.attachments.length }}
+                          </span>
+                        </div>
+                        <button
+                          v-if="selectedMailDetail.attachments.length > 1"
+                          class="btn btn-primary btn-sm px-2.5 py-0.5 text-[11px]"
+                          :disabled="downloadingAllAttachments"
+                          @click="handleDownloadAllAttachments(selectedMailDetail)"
+                        >
+                          {{ downloadingAllAttachments ? '打包中...' : '全部打包下载 (.zip)' }}
+                        </button>
+                      </div>
+                      <div class="grid gap-1.5 sm:grid-cols-2">
+                        <div
+                          v-for="att in selectedMailDetail.attachments"
+                          :key="att.id"
+                          class="mail-attachment-item"
+                        >
+                          <div class="min-w-0 flex-1">
+                            <div class="truncate font-medium text-gray-900 dark:text-white" :title="att.name">
+                              {{ att.name }}
+                            </div>
+                            <div class="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-gray-500 dark:text-dark-400">
+                              <span>{{ formatAttachmentSize(att.size) }}</span>
+                              <span v-if="att.is_inline" class="rounded bg-amber-100 px-1 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+                                内联
+                              </span>
+                            </div>
+                          </div>
+                          <button
+                            class="btn btn-secondary btn-sm shrink-0 px-2 py-0.5 text-[11px]"
+                            :disabled="downloadingAttachmentId === att.id"
+                            @click="handleDownloadAttachment(selectedMailDetail, att)"
+                          >
+                            {{ downloadingAttachmentId === att.id ? '下载中...' : '下载' }}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div v-if="showingRawBody" class="mail-body mail-html-body flex-1 min-h-0">
+                      <div
+                        v-if="hasBlockedRemoteImages && !allowRemoteImages"
+                        class="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-800/60 dark:bg-amber-900/10 dark:text-amber-300"
+                      >
+                        邮件包含远程图片，已默认拦截。
+                        <button class="ml-2 font-semibold underline" @click="allowRemoteImages = true">加载远程图片</button>
+                      </div>
+                      <iframe class="mail-html-frame" sandbox="allow-popups allow-popups-to-escape-sandbox" :srcdoc="displayedRawHtml"></iframe>
+                    </div>
+                    <pre v-else class="mail-body flex-1">{{ displayedMailBody }}</pre>
+                  </div>
+                </transition>
               </div>
             </section>
           </div>
@@ -513,6 +653,13 @@
         <template v-if="contextMenu.kind === 'account'">
           <div class="px-3 py-2 text-xs font-semibold text-gray-500 dark:text-dark-400">账号操作</div>
           <button class="dropdown-item w-full" @click="openEditAccountFromMenu">编辑账号</button>
+          <button
+            v-if="accountCanSendGraph(contextMenu.email)"
+            class="dropdown-item w-full"
+            @click="openComposeFromMenu"
+          >
+            写邮件 (Graph)
+          </button>
           <button class="dropdown-item w-full" @click="runSingleReceive(contextMenu.email)">收件</button>
           <button class="dropdown-item w-full" @click="runSingleRelogin(contextMenu.email)">重新登录</button>
           <button class="dropdown-item w-full" @click="openGraphReauthFromMenu">Graph 重新授权</button>
@@ -619,6 +766,14 @@
           <div>
             <div class="mb-1 font-semibold text-gray-900 dark:text-white">{{ accountMetaPopover.account?.email }}</div>
             <div class="text-gray-500 dark:text-dark-400">分组：{{ accountMetaPopover.account?.group_name || '未分组' }}</div>
+            <div v-if="accountMetaPopover.account?.token_expires_at || accountMetaPopover.account?.last_token_rotated_at" class="mt-1 space-y-0.5 text-[11px] text-gray-500 dark:text-dark-400">
+              <div v-if="accountMetaPopover.account?.last_token_rotated_at">
+                最近轮换：{{ accountMetaPopover.account.last_token_rotated_at }}
+              </div>
+              <div v-if="accountMetaPopover.account?.token_expires_at">
+                预计到期：{{ accountMetaPopover.account.token_expires_at }}
+              </div>
+            </div>
           </div>
           <div>
             <div class="mb-1 text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-dark-400">全部标签</div>
@@ -667,8 +822,11 @@
             <div class="modal-header">
               <div class="modal-title">任务中心</div>
               <div class="flex items-center gap-2">
-                <button class="btn btn-secondary btn-sm px-2 py-1" @click="handleRunTokenRefresh">
-                  立即全量刷新 Token
+                <button class="btn btn-primary btn-sm px-2 py-1" @click="handleRunTokenRefresh(true)">
+                  检查到期窗口 Token
+                </button>
+                <button class="btn btn-secondary btn-sm px-2 py-1" @click="handleRunTokenRefresh(false)">
+                  全量刷新 Token
                 </button>
                 <button class="btn btn-secondary btn-sm px-2 py-1" @click="handleRunBackup">
                   立即备份账号
@@ -688,15 +846,32 @@
             </div>
             <div class="modal-body grid gap-6 lg:grid-cols-2">
               <section class="card p-4">
-                <h3 class="mb-3 text-sm font-semibold text-gray-900 dark:text-white">Token 刷新</h3>
+                <h3 class="mb-3 text-sm font-semibold text-gray-900 dark:text-white">Token 保活刷新</h3>
                 <label class="mb-3 inline-flex items-center gap-2 text-sm">
                   <input v-model="taskSettings.token_refresh_enabled" type="checkbox" />
                   启用定时 Token 刷新
                 </label>
-                <label class="block space-y-2">
-                  <span class="text-xs text-gray-500 dark:text-dark-400">刷新间隔（分钟）</span>
-                  <input v-model.number="taskSettings.token_refresh_interval_minutes" class="input" type="number" min="5" />
-                </label>
+                <div class="space-y-3">
+                  <label class="block space-y-1.5">
+                    <span class="text-xs text-gray-500 dark:text-dark-400">刷新策略</span>
+                    <select v-model="taskSettings.token_refresh_mode" class="input text-xs">
+                      <option value="expiry">按到期窗口每日检查（推荐）</option>
+                      <option value="interval">固定周期全量刷新</option>
+                    </select>
+                  </label>
+                  <label v-if="taskSettings.token_refresh_mode === 'expiry'" class="block space-y-1.5">
+                    <span class="text-xs text-gray-500 dark:text-dark-400">提前刷新窗口（天）</span>
+                    <input v-model.number="taskSettings.token_refresh_window_days" class="input" type="number" min="1" max="60" />
+                  </label>
+                  <label v-else class="block space-y-1.5">
+                    <span class="text-xs text-gray-500 dark:text-dark-400">刷新间隔（分钟）</span>
+                    <input v-model.number="taskSettings.token_refresh_interval_minutes" class="input" type="number" min="5" />
+                  </label>
+                  <label v-if="taskSettings.token_refresh_mode === 'expiry'" class="inline-flex items-center gap-2 text-xs text-gray-600 dark:text-dark-300">
+                    <input v-model="taskSettings.token_refresh_include_unknown_expiry" type="checkbox" />
+                    到期未知的存量账号也纳入每日检查
+                  </label>
+                </div>
               </section>
 
               <section class="card p-4">
@@ -753,7 +928,7 @@
                       <span class="text-gray-500 dark:text-dark-400">{{ item.trigger_source }}</span>
                     </div>
                     <div class="mt-1 text-gray-500 dark:text-dark-400">
-                      成功 {{ item.payload.success_count || 0 }} / 失败 {{ item.payload.failed_count || 0 }}
+                      已轮换 {{ item.payload.rotated_count ?? 0 }} · 未轮换成功 {{ item.payload.verified_unrotated_count ?? item.payload.success_count ?? 0 }} · 失败 {{ item.payload.failed_count || 0 }}
                     </div>
                   </div>
                   <div v-if="!tokenRefreshHistory.length" class="text-xs text-gray-500 dark:text-dark-400">
@@ -906,6 +1081,98 @@
             <div class="modal-footer">
               <button class="btn btn-secondary" @click="closeConfirmDialog">取消</button>
               <button class="btn btn-danger" @click="confirmDialogAction">确认</button>
+            </div>
+          </div>
+        </div>
+      </transition>
+
+      <transition name="modal">
+        <div v-if="composeDialog.open" class="modal-overlay" @click.self="closeComposeModal">
+          <div class="modal-content max-w-2xl">
+            <div class="modal-header">
+              <div class="modal-title">写邮件（Graph API）</div>
+              <button class="btn btn-secondary btn-sm px-2 py-1" :disabled="composeDialog.sending" @click="closeComposeModal">
+                关闭
+              </button>
+            </div>
+            <div class="modal-body space-y-3.5">
+              <div class="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50/70 px-3 py-2 text-xs dark:border-dark-700 dark:bg-dark-800/60">
+                <span class="text-gray-500 dark:text-dark-400">发件账号</span>
+                <span class="font-semibold text-gray-900 dark:text-white">{{ composeDialog.accountEmail }}</span>
+              </div>
+
+              <div
+                v-if="composeDialog.error"
+                class="rounded-xl border px-3 py-2.5 text-xs"
+                :class="
+                  composeDialog.errorType === 'warning'
+                    ? 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-800/60 dark:bg-amber-900/20 dark:text-amber-200'
+                    : 'border-red-200 bg-red-50 text-red-700 dark:border-red-800/60 dark:bg-red-900/20 dark:text-red-300'
+                "
+              >
+                <div>{{ composeDialog.error }}</div>
+                <button
+                  v-if="composeDialog.reauthRequired"
+                  class="btn btn-warning btn-sm mt-2 px-2.5 py-1 text-xs"
+                  @click="reauthorizeComposeAccount"
+                >
+                  立即 Graph 重新授权
+                </button>
+              </div>
+
+              <label class="block space-y-1.5">
+                <span class="text-xs text-gray-500 dark:text-dark-400">收件人（多个地址可用逗号、分号或换行分隔）</span>
+                <input
+                  v-model="composeDialog.recipients"
+                  class="input text-sm"
+                  type="text"
+                  :disabled="composeDialog.sending"
+                  placeholder="example@domain.com"
+                />
+              </label>
+
+              <label class="block space-y-1.5">
+                <span class="text-xs text-gray-500 dark:text-dark-400">抄送（可选）</span>
+                <input
+                  v-model="composeDialog.cc"
+                  class="input text-sm"
+                  type="text"
+                  :disabled="composeDialog.sending"
+                  placeholder="可选，多个地址以逗号分隔"
+                />
+              </label>
+
+              <label class="block space-y-1.5">
+                <span class="text-xs text-gray-500 dark:text-dark-400">主题</span>
+                <input
+                  v-model="composeDialog.subject"
+                  class="input text-sm"
+                  type="text"
+                  :disabled="composeDialog.sending"
+                  placeholder="请输入邮件主题"
+                />
+              </label>
+
+              <label class="block space-y-1.5">
+                <span class="text-xs text-gray-500 dark:text-dark-400">正文（纯文本）</span>
+                <textarea
+                  v-model="composeDialog.body"
+                  class="input min-h-44 text-sm leading-6"
+                  :disabled="composeDialog.sending"
+                  placeholder="请输入邮件正文内容..."
+                ></textarea>
+              </label>
+
+              <p class="text-[11px] text-gray-400 dark:text-dark-500">
+                通过 Microsoft Graph <code class="font-mono">Mail.Send</code> 以当前账号自身身份发送，发送记录保存在已发送文件夹；如历史令牌缺少发信权限，系统会引导重新授权。
+              </p>
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-secondary" :disabled="composeDialog.sending" @click="closeComposeModal">取消</button>
+              <button class="btn btn-primary" :disabled="composeDialog.sending" @click="handleSubmitComposeMail">
+                <span v-if="composeDialog.sending" class="spinner h-3.5 w-3.5"></span>
+                {{ composeDialog.sending ? '提交发送中...' : '发送邮件' }}
+              </button>
             </div>
           </div>
         </div>
@@ -1153,7 +1420,10 @@ import {
   createTag,
   deleteAccounts,
   deleteGroup,
+  deleteMails,
   deleteTag,
+  downloadAllMailAttachments,
+  downloadMailAttachment,
   exportAccounts,
   getAccountDetail,
   getBodyStatus,
@@ -1162,6 +1432,7 @@ import {
   getTokenRefreshHistory,
   importAccounts,
   loadRawMailBody,
+  markMailsRead,
   openMail,
   receiveAccounts,
   reloginAccounts,
@@ -1169,6 +1440,7 @@ import {
   runAccountBackup,
   runTokenRefresh,
   saveSettings,
+  sendGraphMail,
   setAccountTags,
   startManualOauth,
   startGraphReauth,
@@ -1191,6 +1463,7 @@ import type {
   GroupDefinition,
   HeaderMetric,
   MailAccountSummary,
+  MailAttachment,
   MailItem,
   TagDefinition,
 } from '@/types'
@@ -1230,6 +1503,25 @@ const selectedAccountEmail = ref<string | null>(null)
 const selectedMailKey = ref('')
 const selectedMailDetail = ref<MailItem | null>(null)
 const selectedBodyTask = ref<BodyTask | null>(null)
+const openingMail = ref(false)
+let mailOpenSeq = 0
+const checkedMailKeys = ref<string[]>([])
+const downloadingAttachmentId = ref('')
+const downloadingAllAttachments = ref(false)
+const deletingMails = ref(false)
+const markingMailsRead = ref(false)
+const composeDialog = ref({
+  open: false,
+  accountEmail: '',
+  recipients: '',
+  cc: '',
+  subject: '',
+  body: '',
+  sending: false,
+  error: '',
+  errorType: 'error' as 'error' | 'warning',
+  reauthRequired: false,
+})
 const translatedMailBody = ref('')
 const showingTranslatedBody = ref(false)
 const translatingBody = ref(false)
@@ -1321,8 +1613,11 @@ const tokenRefreshHistory = ref<
 const taskSettings = ref({
   token_refresh_enabled: false,
   token_refresh_interval_minutes: 360,
+  token_refresh_mode: 'expiry' as 'expiry' | 'interval',
+  token_refresh_window_days: 7,
+  token_refresh_include_unknown_expiry: true,
   auto_receive_enabled: false,
-  auto_receive_interval_minutes: 15,
+  auto_receive_interval_minutes: 30,
   backup_enabled: false,
   backup_interval_minutes: 1440,
   backup_directory: 'backups',
@@ -1652,6 +1947,19 @@ const hasActiveQueue = computed(() => {
 const showBodyTaskBar = computed(() => {
   const state = selectedBodyTask.value?.state
   return state === 'queued' || state === 'downloading' || state === 'error'
+})
+const isMailBodyLoading = computed(() => {
+  if (!selectedMailKey.value) return false
+  if (openingMail.value) return true
+  const state = selectedBodyTask.value?.state
+  if ((state === 'queued' || state === 'downloading') && !selectedMailDetail.value?.body_text) {
+    return true
+  }
+  return false
+})
+const allPageMailsChecked = computed(() => {
+  const items = paginatedMails.value
+  return items.length > 0 && items.every((item) => checkedMailKeys.value.includes(item.local_key))
 })
 
 const headerMetrics = computed<HeaderMetric[]>(() => [
@@ -2027,6 +2335,9 @@ async function refreshState(silent = false) {
       taskSettings.value = {
         token_refresh_enabled: response.data.settings.token_refresh_enabled,
         token_refresh_interval_minutes: response.data.settings.token_refresh_interval_minutes,
+        token_refresh_mode: response.data.settings.token_refresh_mode || 'expiry',
+        token_refresh_window_days: response.data.settings.token_refresh_window_days || 7,
+        token_refresh_include_unknown_expiry: response.data.settings.token_refresh_include_unknown_expiry ?? true,
         auto_receive_enabled: response.data.settings.auto_receive_enabled,
         auto_receive_interval_minutes: response.data.settings.auto_receive_interval_minutes,
         backup_enabled: response.data.settings.backup_enabled,
@@ -2035,7 +2346,11 @@ async function refreshState(silent = false) {
         backup_keep_count: response.data.settings.backup_keep_count,
       }
     }
-    if (selectedMailKey.value) {
+    const existingMailKeySet = new Set(response.data.mails.map((item) => item.local_key))
+    if (checkedMailKeys.value.length > 0) {
+      checkedMailKeys.value = checkedMailKeys.value.filter((key) => existingMailKeySet.has(key))
+    }
+    if (selectedMailKey.value && !openingMail.value) {
       const current = response.data.mails.find((item) => item.local_key === selectedMailKey.value)
       if (current) {
         const sameSelected = selectedMailDetail.value?.local_key === current.local_key
@@ -2043,6 +2358,10 @@ async function refreshState(silent = false) {
           ...current,
           body_text: (sameSelected && selectedMailDetail.value?.body_text) || current.body_text,
           body_html: (sameSelected && selectedMailDetail.value?.body_html) || current.body_html,
+          attachments:
+            (sameSelected && selectedMailDetail.value?.attachments?.length
+              ? selectedMailDetail.value.attachments
+              : current.attachments) || [],
         }
       }
     }
@@ -2226,9 +2545,8 @@ async function copyGraphField(value: string, label: string) {
   }
 }
 
-async function openGraphReauthFromMenu() {
-  const email = contextMenu.value.email
-  closeContextMenu()
+async function startGraphReauthForEmail(email: string) {
+  if (!email) return
   try {
     const response = await startGraphReauth(email)
     graphReauthDialog.value = {
@@ -2250,6 +2568,12 @@ async function openGraphReauthFromMenu() {
   } catch (error: any) {
     showError(error?.response?.data?.detail || 'Graph 重新授权启动失败')
   }
+}
+
+async function openGraphReauthFromMenu() {
+  const email = contextMenu.value.email
+  closeContextMenu()
+  await startGraphReauthForEmail(email)
 }
 
 async function pollGraphReauth(manual = false) {
@@ -2303,6 +2627,9 @@ async function saveTaskCenterSettings() {
     taskSettings.value = {
       token_refresh_enabled: response.data.token_refresh_enabled,
       token_refresh_interval_minutes: response.data.token_refresh_interval_minutes,
+      token_refresh_mode: response.data.token_refresh_mode || 'expiry',
+      token_refresh_window_days: response.data.token_refresh_window_days || 7,
+      token_refresh_include_unknown_expiry: response.data.token_refresh_include_unknown_expiry ?? true,
       auto_receive_enabled: response.data.auto_receive_enabled,
       auto_receive_interval_minutes: response.data.auto_receive_interval_minutes,
       backup_enabled: response.data.backup_enabled,
@@ -2317,9 +2644,9 @@ async function saveTaskCenterSettings() {
   }
 }
 
-async function handleRunTokenRefresh() {
+async function handleRunTokenRefresh(onlyExpiring = false) {
   try {
-    const response = await runTokenRefresh()
+    const response = await runTokenRefresh(onlyExpiring)
     showSuccess(response.message)
     await loadTokenRefreshHistory()
     await refreshState(true)
@@ -2542,6 +2869,7 @@ async function handleExportAccounts() {
 
 function selectGroup(groupKey: string) {
   selectedGroupKey.value = groupKey
+  checkedMailKeys.value = []
   if (groupKey === '__all__') {
     selectedAccountEmail.value = null
   }
@@ -2549,6 +2877,7 @@ function selectGroup(groupKey: string) {
 
 function selectTag(tagKey: string) {
   selectedTagKey.value = tagKey
+  checkedMailKeys.value = []
 }
 
 function toggleAccount(email: string, checked: boolean) {
@@ -2563,10 +2892,12 @@ function toggleAllAccounts(checked: boolean) {
 
 async function filterAccount(email: string) {
   selectedAccountEmail.value = email
+  checkedMailKeys.value = []
 }
 
 async function filterAllMails() {
   selectedAccountEmail.value = null
+  checkedMailKeys.value = []
 }
 
 function computeContextMenuY(eventY: number, estimatedHeight: number) {
@@ -2610,27 +2941,297 @@ function statusTextClass(status: string) {
   return 'text-gray-900 dark:text-white'
 }
 
+function toggleMailChecked(localKey: string, checked: boolean) {
+  checkedMailKeys.value = checked
+    ? Array.from(new Set([...checkedMailKeys.value, localKey]))
+    : checkedMailKeys.value.filter((key) => key !== localKey)
+}
+
+function toggleSelectAllPageMails() {
+  const pageKeys = paginatedMails.value.map((item) => item.local_key)
+  if (!pageKeys.length) return
+  if (allPageMailsChecked.value) {
+    const pageSet = new Set(pageKeys)
+    checkedMailKeys.value = checkedMailKeys.value.filter((key) => !pageSet.has(key))
+  } else {
+    checkedMailKeys.value = Array.from(new Set([...checkedMailKeys.value, ...pageKeys]))
+  }
+}
+
+function formatAttachmentSize(size: number) {
+  const bytes = Number(size) || 0
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1).replace(/\.0$/, '')} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1).replace(/\.0$/, '')} MB`
+}
+
+function parseDownloadFilename(contentDisposition: string | undefined, fallback: string) {
+  const header = String(contentDisposition || '')
+  const utf8Match = header.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match) {
+    try {
+      return decodeURIComponent(utf8Match[1].trim().replace(/^"|"$/g, '')) || fallback
+    } catch {
+      return fallback
+    }
+  }
+  const plainMatch = header.match(/filename="?([^";]+)"?/i)
+  return plainMatch?.[1] || fallback
+}
+
+function triggerBlobDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename || 'attachment'
+  anchor.style.display = 'none'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+async function handleDownloadAttachment(mail: MailItem, att: MailAttachment) {
+  if (downloadingAttachmentId.value) return
+  downloadingAttachmentId.value = att.id
+  try {
+    const response = await downloadMailAttachment(mail.local_key, att.id)
+    const filename = parseDownloadFilename(response.headers?.['content-disposition'], att.name || 'attachment')
+    triggerBlobDownload(new Blob([response.data], { type: att.content_type || 'application/octet-stream' }), filename)
+    showSuccess(`开始下载：${filename}`)
+  } catch (error: any) {
+    showError(error?.response?.data?.detail || '附件下载失败')
+  } finally {
+    downloadingAttachmentId.value = ''
+  }
+}
+
+async function handleDownloadAllAttachments(mail: MailItem) {
+  if (downloadingAllAttachments.value) return
+  downloadingAllAttachments.value = true
+  try {
+    const response = await downloadAllMailAttachments(mail.local_key)
+    const filename = parseDownloadFilename(response.headers?.['content-disposition'], 'attachments.zip')
+    triggerBlobDownload(new Blob([response.data], { type: 'application/zip' }), filename)
+    showSuccess(`附件打包下载已开始：${filename}`)
+  } catch (error: any) {
+    showError(error?.response?.data?.detail || '全部附件打包下载失败')
+  } finally {
+    downloadingAllAttachments.value = false
+  }
+}
+
+async function handleMarkCheckedMailsRead(isRead = true) {
+  if (!checkedMailKeys.value.length || markingMailsRead.value) return
+  markingMailsRead.value = true
+  try {
+    const response = await markMailsRead(checkedMailKeys.value, isRead)
+    showSuccess(response.message)
+    checkedMailKeys.value = []
+    await refreshState(true)
+  } catch (error: any) {
+    showError(error?.response?.data?.detail || '批量标记已读失败')
+  } finally {
+    markingMailsRead.value = false
+  }
+}
+
+function confirmDeleteMails(localKeys: string[]) {
+  const uniqueKeys = Array.from(new Set(localKeys.filter(Boolean)))
+  if (!uniqueKeys.length) return
+  const countText = uniqueKeys.length === 1 ? '这封邮件' : `选中的 ${uniqueKeys.length} 封邮件`
+  openConfirmDialog(
+    '删除邮件',
+    `确定永久删除${countText}吗？将同步从远程邮箱与本地缓存中移除，操作不可恢复。`,
+    async () => {
+      deletingMails.value = true
+      try {
+        const response = await deleteMails(uniqueKeys)
+        const deletedSet = new Set(response.data.deleted_keys || [])
+        checkedMailKeys.value = checkedMailKeys.value.filter((key) => !deletedSet.has(key))
+        if (selectedMailKey.value && deletedSet.has(selectedMailKey.value)) {
+          stopBodyPolling()
+          selectedMailKey.value = ''
+          selectedMailDetail.value = null
+          selectedBodyTask.value = null
+          openingMail.value = false
+        }
+        showSuccess(response.message)
+        await refreshState(true)
+      } catch (error: any) {
+        showError(error?.response?.data?.detail || '删除邮件失败')
+      } finally {
+        deletingMails.value = false
+      }
+    },
+  )
+}
+
+function accountCanSendGraph(email: string) {
+  return Boolean(allAccounts.value.find((item) => item.email === email)?.can_send_graph)
+}
+
+function openComposeModal(accountEmail: string) {
+  if (!accountEmail) return
+  const sameAccount = composeDialog.value.accountEmail === accountEmail
+  composeDialog.value = {
+    open: true,
+    accountEmail,
+    recipients: sameAccount ? composeDialog.value.recipients : '',
+    cc: sameAccount ? composeDialog.value.cc : '',
+    subject: sameAccount ? composeDialog.value.subject : '',
+    body: sameAccount ? composeDialog.value.body : '',
+    sending: false,
+    error: '',
+    errorType: 'error',
+    reauthRequired: false,
+  }
+}
+
+function openComposeFromMenu() {
+  const email = contextMenu.value.email
+  closeContextMenu()
+  openComposeModal(email)
+}
+
+function closeComposeModal() {
+  if (composeDialog.value.sending) return
+  composeDialog.value.open = false
+}
+
+async function reauthorizeComposeAccount() {
+  const email = composeDialog.value.accountEmail
+  if (!email) return
+  composeDialog.value.open = false
+  await startGraphReauthForEmail(email)
+}
+
+function parseEmailListInput(raw: string): string[] {
+  return String(raw || '')
+    .split(/[,;\n，；]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+async function handleSubmitComposeMail() {
+  if (composeDialog.value.sending) return
+  const recipients = parseEmailListInput(composeDialog.value.recipients)
+  const cc = parseEmailListInput(composeDialog.value.cc)
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+  if (!recipients.length) {
+    composeDialog.value.error = '请至少填写一个收件人邮箱地址'
+    composeDialog.value.errorType = 'error'
+    composeDialog.value.reauthRequired = false
+    return
+  }
+  const invalidTo = recipients.find((addr) => !emailRegex.test(addr))
+  if (invalidTo) {
+    composeDialog.value.error = `收件人邮箱格式无效：${invalidTo}`
+    composeDialog.value.errorType = 'error'
+    composeDialog.value.reauthRequired = false
+    return
+  }
+  const invalidCc = cc.find((addr) => !emailRegex.test(addr))
+  if (invalidCc) {
+    composeDialog.value.error = `抄送邮箱格式无效：${invalidCc}`
+    composeDialog.value.errorType = 'error'
+    composeDialog.value.reauthRequired = false
+    return
+  }
+  if (!composeDialog.value.subject.trim() && !composeDialog.value.body.trim()) {
+    composeDialog.value.error = '主题和正文不能同时为空'
+    composeDialog.value.errorType = 'error'
+    composeDialog.value.reauthRequired = false
+    return
+  }
+
+  composeDialog.value.sending = true
+  composeDialog.value.error = ''
+  composeDialog.value.reauthRequired = false
+  try {
+    const response = await sendGraphMail({
+      account_email: composeDialog.value.accountEmail,
+      recipients,
+      cc,
+      subject: composeDialog.value.subject,
+      body: composeDialog.value.body,
+    })
+    showSuccess(response.message || '邮件已提交发送')
+    composeDialog.value.recipients = ''
+    composeDialog.value.cc = ''
+    composeDialog.value.subject = ''
+    composeDialog.value.body = ''
+    composeDialog.value.open = false
+  } catch (error: any) {
+    const detail = error?.response?.data?.detail
+    if (detail && typeof detail === 'object') {
+      composeDialog.value.error = detail.message || '邮件发送失败'
+      composeDialog.value.reauthRequired = Boolean(detail.reauth_required)
+      composeDialog.value.errorType =
+        detail.code === 'GRAPH_SEND_RESULT_UNKNOWN' || detail.code === 'GRAPH_SEND_THROTTLED' ? 'warning' : 'error'
+    } else {
+      composeDialog.value.error =
+        typeof detail === 'string' && detail
+          ? detail
+          : '网络超时或连接中断，发送结果不确定，请先确认后再决定是否重发'
+      composeDialog.value.errorType = typeof detail === 'string' && detail ? 'error' : 'warning'
+      composeDialog.value.reauthRequired = false
+    }
+  } finally {
+    composeDialog.value.sending = false
+  }
+}
+
 async function handleOpenMail(mail: MailItem) {
+  const seq = ++mailOpenSeq
+  stopBodyPolling()
   selectedMailKey.value = mail.local_key
+  openingMail.value = true
   translatedMailBody.value = ''
   showingTranslatedBody.value = false
   translatingBody.value = false
   showingRawBody.value = false
   allowRemoteImages.value = false
+  selectedBodyTask.value = null
+
+  // Immediately switch detail header to target mail so previous mail never freezes on screen
+  selectedMailDetail.value = {
+    ...mail,
+    body_text: '',
+    body_html: '',
+    attachments: [],
+  }
+
+  // Optimistically mark mail as read in local store so clicking feels instant
+  if (dashboard.value?.settings.mark_read_on_open && mail.is_unread) {
+    const listMail = dashboard.value.mails.find((item) => item.local_key === mail.local_key)
+    if (listMail && listMail.is_unread) {
+      listMail.is_unread = false
+      const ownerAccount = dashboard.value.accounts.find((acc) => acc.email === mail.account_email)
+      if (ownerAccount) {
+        ownerAccount.unseen_count = Math.max(0, ownerAccount.unseen_count - 1)
+      }
+      dashboard.value.overview.unread_mails = Math.max(0, dashboard.value.overview.unread_mails - 1)
+    }
+  }
+
   try {
     const response = await openMail(mail.local_key)
+    if (seq !== mailOpenSeq) return
     selectedMailDetail.value = response.data.mail
     selectedBodyTask.value = response.data.body_task
+    openingMail.value = false
     if (
       selectedBodyTask.value.state === 'queued' ||
       selectedBodyTask.value.state === 'downloading'
     ) {
-      startBodyPolling(mail.local_key)
+      startBodyPolling(mail.local_key, seq)
     } else {
       stopBodyPolling()
     }
-    await refreshState(true)
   } catch (error: any) {
+    if (seq !== mailOpenSeq) return
+    openingMail.value = false
     showError(error?.response?.data?.detail || '打开邮件失败')
   }
 }
@@ -2648,11 +3249,19 @@ async function handleToggleStar(mail: MailItem) {
   }
 }
 
-function startBodyPolling(localKey: string) {
+function startBodyPolling(localKey: string, seq: number) {
   stopBodyPolling()
   bodyTimer = window.setInterval(async () => {
+    if (seq !== mailOpenSeq || selectedMailKey.value !== localKey) {
+      stopBodyPolling()
+      return
+    }
     try {
       const response = await getBodyStatus(localKey)
+      if (seq !== mailOpenSeq || selectedMailKey.value !== localKey) {
+        stopBodyPolling()
+        return
+      }
       selectedMailDetail.value = response.data.mail
       selectedBodyTask.value = response.data.body_task
       if (['done', 'error', 'idle'].includes(response.data.body_task.state)) {
@@ -2662,7 +3271,7 @@ function startBodyPolling(localKey: string) {
     } catch {
       stopBodyPolling()
     }
-  }, 900)
+  }, 800)
 }
 
 function stopBodyPolling() {

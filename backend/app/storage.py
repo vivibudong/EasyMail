@@ -322,6 +322,16 @@ class SqliteStorage:
                 (email_addr,),
             )
 
+    def delete_mail_items(self, local_keys: list[str]) -> None:
+        keys = [str(key).strip() for key in local_keys if str(key).strip()]
+        if not keys:
+            return
+        with self._connect() as connection:
+            connection.executemany(
+                "DELETE FROM mail_cache WHERE local_key = ?",
+                [(key,) for key in keys],
+            )
+
     def clear_mail_cache(self) -> None:
         with self._connect() as connection:
             connection.execute("DELETE FROM mail_cache")
