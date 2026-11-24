@@ -1,5 +1,5 @@
 import { apiClient, type ApiResponse } from './client'
-import type { AppSettings, BodyTask, DashboardState, MailItem } from '@/types'
+import type { AppSettings, BodyTask, DashboardState, MailItem, TranslateProviderOption } from '@/types'
 
 export async function getDashboardState(accountEmail?: string) {
   const { data } = await apiClient.get<ApiResponse<DashboardState>>('/dashboard/state', {
@@ -292,8 +292,33 @@ export async function translateText(text: string) {
   const { data } = await apiClient.post<
     ApiResponse<{
       translated_text: string
+      provider?: string
     }>
   >('/translate', { text })
+  return data
+}
+
+export async function getTranslateProviders() {
+  const { data } = await apiClient.get<
+    ApiResponse<{
+      items: TranslateProviderOption[]
+    }>
+  >('/translate/providers')
+  return data
+}
+
+export async function testTranslateService(payload?: {
+  text?: string
+  provider?: string
+  api_key?: string
+  model?: string
+}) {
+  const { data } = await apiClient.post<
+    ApiResponse<{
+      translated_text: string
+      provider: string
+    }>
+  >('/translate/test', payload || {})
   return data
 }
 

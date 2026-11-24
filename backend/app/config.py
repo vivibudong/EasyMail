@@ -66,6 +66,10 @@ def _load_or_create_runtime_config(data_dir: Path) -> tuple[dict[str, Any], dict
     }
     tmp_path = config_path.with_suffix(".json.tmp")
     tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        os.chmod(tmp_path, 0o600)
+    except OSError:
+        pass
     tmp_path.replace(config_path)
     return payload, {"admin_email": generated_admin_email, "admin_password": generated_password}
 
@@ -75,6 +79,10 @@ def _write_runtime_config(data_dir: Path, payload: dict[str, Any]) -> None:
     config_path = data_dir / "runtime_config.json"
     tmp_path = config_path.with_suffix(".json.tmp")
     tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        os.chmod(tmp_path, 0o600)
+    except OSError:
+        pass
     tmp_path.replace(config_path)
 
 
@@ -102,7 +110,6 @@ class AppConfig:
             "site_name": self.app_name,
             "site_subtitle": self.app_subtitle,
             "site_description": self.app_description,
-            "admin_email": self.admin_email,
             "version": self.app_version,
         }
 
@@ -117,7 +124,7 @@ def _build_config() -> AppConfig:
         app_name=os.getenv("APP_NAME", "EasyMail"),
         app_subtitle=os.getenv("APP_SUBTITLE", "Compose 驱动的多邮箱 IMAP 管理平台"),
         app_description=os.getenv("APP_DESCRIPTION", "面向多邮箱账号的统一收件、管理与日志排查平台。"),
-        app_version=os.getenv("APP_VERSION", "0.1.6"),
+        app_version=os.getenv("APP_VERSION", "0.1.7"),
         admin_email=str(runtime_config.get("admin_email") or "admin@easymail.local"),
         admin_password_hash=str(runtime_config.get("admin_password_hash") or ""),
         jwt_secret=str(runtime_config.get("jwt_secret") or secrets.token_urlsafe(48)),
@@ -135,7 +142,8 @@ def update_admin_credentials(admin_email: str, admin_password: str) -> None:
     runtime_config, _ = _load_or_create_runtime_config(config.data_dir)
     runtime_config["admin_email"] = admin_email
     runtime_config["admin_password_hash"] = _hash_password(admin_password)
-    runtime_config["jwt_secret"] = runtime_config.get("jwt_secret") or config.jwt_secret
+    # Rotate JWT secret on credential update to invalidate previously issued sessions
+    runtime_config["jwt_secret"] = secrets.token_urlsafe(48)
     runtime_config["token_expire_hours"] = int(
         runtime_config.get("token_expire_hours", config.token_expire_hours) or config.token_expire_hours
     )

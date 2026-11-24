@@ -364,31 +364,81 @@ def _html_to_text(raw_html: str) -> str:
     return text.strip()
 
 
+def _is_safe_url(url: str, *, allow_mailto: bool = False, allow_data_image: bool = False) -> bool:
+    decoded = html.unescape(url or "")
+    normalized = re.sub(r"[\x00-\x20]+", "", decoded).lower()
+    if not normalized:
+        return True
+    if normalized.startswith(("#", "/")):
+        return not normalized.startswith("//")
+    if normalized.startswith(("http://", "https://")):
+        return True
+    if allow_mailto and normalized.startswith("mailto:"):
+        return True
+    if allow_data_image and re.match(r"^data:image/(png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$", normalized):
+        return True
+    return False
+
+
 def _sanitize_mail_html(raw_html: str, allow_remote_images: bool = False) -> str:
     text = raw_html or ""
     text = re.sub(r"<!doctype[^>]*>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"<\s*meta[^>]*>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"<\s*link[^>]*>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"<\s*base[^>]*>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"<(script|style|iframe|object|embed|form|input|button|textarea|select)[^>]*>.*?</\1\s*>", "", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<\s*(script|style|iframe|object|embed|form|input|button|textarea|select)[^>]*>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s+on[a-zA-Z]+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", text)
-    text = re.sub(r"\s+(href|src)\s*=\s*(\"|')\s*javascript:[^\"']*(\"|')", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s+(href|src)\s*=\s*javascript:[^\s>]+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<\s*(meta|link|base)\b[^>]*>", "", text, flags=re.IGNORECASE)
+    dangerous_tags = r"script|style|iframe|object|embed|form|input|button|textarea|select|svg|math|audio|video|source"
+    text = re.sub(
+        rf"<\s*({dangerous_tags})\b[^>]*>.*?</\s*\1\s*>",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(rf"<\s*/?\s*({dangerous_tags})\b[^>]*>", "", text, flags=re.IGNORECASE)
+    # Strip event handlers regardless of preceding whitespace or slash
+    text = re.sub(r"(?<=[\s/])on[a-zA-Z]+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", text)
+    # Strip srcset attributes to prevent bypassing remote image blocking
+    text = re.sub(r"(?<=[\s/])srcset\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", text, flags=re.IGNORECASE)
+
+    def sanitize_url_attr(match: re.Match[str]) -> str:
+        attr_name = match.group(1).lower()
+        raw_val = match.group(3) if match.group(3) is not None else (match.group(4) if match.group(4) is not None else (match.group(5) or ""))
+        if _is_safe_url(raw_val, allow_mailto=(attr_name == "href"), allow_data_image=(attr_name == "src")):
+            return match.group(0)
+        return ""
+
+    text = re.sub(
+        r"(?<=[\s/])(href|action|formaction|xlink:href)\s*=\s*(\"([^\"]*)\"|'([^']*)'|([^\s>]+))",
+        sanitize_url_attr,
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    if not allow_remote_images:
+        # Block remote CSS background tracking pixels in inline styles
+        text = re.sub(
+            r"url\s*\(\s*['\"]?\s*(?:https?:|//)[^)]*\)",
+            "none",
+            text,
+            flags=re.IGNORECASE,
+        )
 
     def replace_img(match: re.Match[str]) -> str:
         tag = match.group(0)
-        src_match = re.search(r"\ssrc\s*=\s*(\"([^\"]*)\"|'([^']*)'|([^\s>]+))", tag, flags=re.IGNORECASE)
+        src_match = re.search(r"(?<=[\s/])src\s*=\s*(\"([^\"]*)\"|'([^']*)'|([^\s>]+))", tag, flags=re.IGNORECASE)
         src = html.unescape((src_match.group(2) or src_match.group(3) or src_match.group(4) or "").strip()) if src_match else ""
-        is_remote = bool(re.match(r"https?://", src, flags=re.IGNORECASE))
+        if not src:
+            return ""
+        is_remote = bool(re.match(r"^(?:https?:)?//", src, flags=re.IGNORECASE))
+        if not is_remote and not _is_safe_url(src, allow_data_image=True):
+            return ""
         safe_src = html.escape(src, quote=True)
         if is_remote and not allow_remote_images:
-            return f'<span class="mail-image-placeholder" data-src="{safe_src}">远程图片已拦截</span>'
-        if src:
-            clean_tag = re.sub(r"\ssrc\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", f' src="{safe_src}"', tag, flags=re.IGNORECASE)
-        else:
-            clean_tag = tag
-        clean_tag = re.sub(r"\s+on[a-zA-Z]+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", clean_tag)
+            return f'<span class="mail-image-placeholder" data-easymail-img-src="{safe_src}">远程图片已拦截</span>'
+        clean_tag = re.sub(
+            r"(?<=[\s/])src\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)",
+            f'src="{safe_src}"',
+            tag,
+            flags=re.IGNORECASE,
+        )
+        clean_tag = re.sub(r"(?<=[\s/])on[a-zA-Z]+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", clean_tag)
         return clean_tag
 
     text = re.sub(r"<\s*img\b[^>]*>", replace_img, text, flags=re.IGNORECASE)
@@ -621,26 +671,33 @@ def fetch_mails_once(
             except Exception:
                 continue
 
-            unseen_typ, unseen_data = client.search(None, "UNSEEN")
-            unseen_ids = (
+            unseen_typ, unseen_data = client.uid("search", None, "UNSEEN")
+            unseen_uids = (
                 unseen_data[0].split()
                 if unseen_typ == "OK" and unseen_data and unseen_data[0]
                 else []
             )
-            unseen_total += len(unseen_ids)
+            unseen_uid_set = set(unseen_uids)
 
-            all_typ, all_data = client.search(None, "ALL")
+            all_typ, all_data = client.uid("search", None, "ALL")
             if all_typ != "OK":
                 continue
-            all_ids = all_data[0].split() if all_data and all_data[0] else []
+            all_uids = all_data[0].split() if all_data and all_data[0] else []
 
-            for msg_id in all_ids:
-                msg_id_str = msg_id.decode(errors="ignore")
-                local_key = f"{account.email}|{folder}|{msg_id_str}"
+            for msg_uid in all_uids:
+                uid_str = msg_uid.decode(errors="ignore")
+                local_key = f"{account.email}|imap_uid|{folder}|{uid_str}"
+                is_unread = msg_uid in unseen_uid_set
+                if local_read_keys and local_key in local_read_keys:
+                    is_unread = False
                 if local_key in existing_by_key:
+                    existing_item = existing_by_key[local_key]
+                    existing_item.is_unread = is_unread
+                    if existing_item.is_unread:
+                        unseen_total += 1
                     continue
-                fetch_typ, fetch_data = client.fetch(
-                    msg_id, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE FROM)])"
+                fetch_typ, fetch_data = client.uid(
+                    "fetch", msg_uid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])"
                 )
                 if fetch_typ != "OK" or not fetch_data:
                     continue
@@ -653,26 +710,24 @@ def fetch_mails_once(
                 msg = email.message_from_bytes(header_block)
                 raw_from = msg.get("From")
                 display_name, sender_address = email.utils.parseaddr(raw_from or "")
-                is_unread = True
-                if local_read_keys and local_key in local_read_keys:
-                    is_unread = False
+                if is_unread:
+                    unseen_total += 1
                 new_item = MailItem(
                     account_email=account.email,
-                    msg_id=msg_id,
+                    msg_id=msg_uid,
                     folder=folder,
                     local_key=local_key,
                     subject=decode_text(msg.get("Subject")) or "(无主题)",
                     from_text=format_sender_display(decode_text(display_name), sender_address),
                     date_text="",
                     date_value=parse_email_date(decode_text(msg.get("Date"))),
-                    source="imap",
+                    source="imap_uid",
                     is_unread=is_unread,
                     body_text="",
                 )
                 new_item.date_text = format_shanghai_time(new_item.date_value)
                 existing_by_key[local_key] = new_item
 
-        client.logout()
         merged = list(existing_by_key.values())
         merged.sort(key=lambda item: item.date_value, reverse=True)
         return unseen_total, merged, "收信成功"
@@ -682,6 +737,11 @@ def fetch_mails_once(
             list(existing_by_key.values()) if "existing_by_key" in locals() else (existing_mails or []),
             str(exc),
         )
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
 
 
 def fetch_mail_body(
@@ -718,6 +778,13 @@ def fetch_mail_body(
     client, _, err = connect_imap(account)
     if client is None:
         return "", err, 0, 0.0
+    use_uid = source == "imap_uid"
+
+    def _imap_fetch(query_spec: str):
+        if use_uid:
+            return client.uid("fetch", msg_id, query_spec)
+        return client.fetch(msg_id, query_spec)
+
     try:
         started = time.perf_counter()
         try:
@@ -725,10 +792,9 @@ def fetch_mail_body(
         except Exception:
             typ, _ = client.select('"INBOX"', readonly=True)
         if typ != "OK":
-            client.logout()
             return "", f"无法选择文件夹: {folder}", 0, 0.0
 
-        size_typ, size_data = client.fetch(msg_id, "(RFC822.SIZE)")
+        size_typ, size_data = _imap_fetch("(RFC822.SIZE)")
         total_size = 0
         if size_typ == "OK" and size_data:
             for item in size_data:
@@ -744,9 +810,7 @@ def fetch_mail_body(
 
         if total_size > 0:
             while downloaded < total_size:
-                fetch_typ, fetch_data = client.fetch(
-                    msg_id, f"(BODY.PEEK[]<{downloaded}.{chunk_size}>)"
-                )
+                fetch_typ, fetch_data = _imap_fetch(f"(BODY.PEEK[]<{downloaded}.{chunk_size}>)")
                 if fetch_typ != "OK" or not fetch_data:
                     break
                 received = b""
@@ -762,15 +826,13 @@ def fetch_mail_body(
                     speed = (downloaded / 1024.0) / elapsed
                     progress_callback(downloaded, total_size, speed)
         else:
-            fetch_typ, fetch_data = client.fetch(msg_id, "(BODY.PEEK[])")
+            fetch_typ, fetch_data = _imap_fetch("(BODY.PEEK[])")
             if fetch_typ != "OK" or not fetch_data:
-                client.logout()
                 return "", "读取邮件正文失败", 0, 0.0
             for item in fetch_data:
                 if isinstance(item, tuple) and isinstance(item[1], bytes):
                     raw_bytes += item[1]
 
-        client.logout()
         if not raw_bytes:
             return "", "邮件正文为空", 0, 0.0
         msg = email.message_from_bytes(raw_bytes)
@@ -783,3 +845,8 @@ def fetch_mail_body(
         return extract_body_text(msg), "OK", len(raw_bytes), duration
     except Exception as exc:
         return "", str(exc), 0, 0.0
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass

@@ -41,6 +41,7 @@ from .models import (
     settings_to_dict,
 )
 from .storage import SqliteStorage
+from .translate import normalize_translate_model, normalize_translate_provider
 
 
 class MailManager:
@@ -329,11 +330,14 @@ class MailManager:
                 return
             now = time.time()
             queue_busy = bool(self.receive_busy_email or self.queued_receive)
+            summary_interval = max(5, int(self.settings.telegram_mail_summary_minutes or 60)) * 60
             if len(self.pending_mail_notifications) < 10:
                 if queue_busy and not force:
                     return
-                if not force and self.last_mail_event_at and now - self.last_mail_event_at < 30:
-                    return
+                if not force:
+                    elapsed = now - (self.pending_mail_batch_started_at or self.last_mail_event_at or now)
+                    if elapsed < summary_interval:
+                        return
             items = self.pending_mail_notifications[:10]
             self.pending_mail_notifications = self.pending_mail_notifications[10:]
             if self.pending_mail_notifications:
@@ -632,7 +636,10 @@ class MailManager:
             "mail_count": len(account.mails),
         }
 
-    def serialize_mail(self, item: MailItem) -> dict:
+    def serialize_mail(self, item: MailItem, *, include_body: bool = True) -> dict:
+        preview = ""
+        if item.body_text:
+            preview = re.sub(r"\s+", " ", item.body_text).strip()[:240]
         return {
             "account_email": item.account_email,
             "folder": self._folder_display_name(item.folder),
@@ -645,8 +652,9 @@ class MailManager:
             "is_unread": item.is_unread,
             "is_starred": item.is_starred,
             "has_body": bool(item.body_text),
-            "body_text": item.body_text,
-            "body_html": item.body_html,
+            "body_preview": preview,
+            "body_text": item.body_text if include_body else "",
+            "body_html": item.body_html if include_body else "",
             "verification_codes": item.verification_codes,
         }
 
@@ -725,7 +733,7 @@ class MailManager:
                     self.serialize_account(account, idx)
                     for idx, account in enumerate(self.accounts, start=1)
                 ],
-                "mails": [self.serialize_mail(item) for item in self.all_mails],
+                "mails": [self.serialize_mail(item, include_body=False) for item in self.all_mails],
                 "settings": settings_to_dict(self.settings),
             }
 
@@ -767,8 +775,11 @@ class MailManager:
             if not emails:
                 return 0
             targets = [account for account in self.accounts if account.email in emails]
+            if not targets:
+                return 0
             self._ensure_accounts_not_locked(targets, "删除")
-            for email_addr in emails:
+            target_emails = {account.email for account in targets}
+            for email_addr in target_emails:
                 self.storage.remove_mail_cache(email_addr)
                 prefix = f"{email_addr}|"
                 self.local_read_keys = {
@@ -779,11 +790,16 @@ class MailManager:
                     for key, value in self.body_tasks.items()
                     if not key.startswith(prefix)
                 }
-            self.accounts = [item for item in self.accounts if item.email not in emails]
+                self.queued_login.discard(email_addr)
+                self.queued_receive.discard(email_addr)
+                self.queued_body = {
+                    key for key in self.queued_body if not key.startswith(prefix)
+                }
+            self.accounts = [item for item in self.accounts if item.email not in target_emails]
             self.storage.save_read_state(self.local_read_keys)
             self._save_accounts_state()
             self.rebuild_mail_pool()
-            return len(emails)
+            return len(target_emails)
 
     def set_flag(self, email_addr: str, color: str) -> None:
         with self.lock:
@@ -884,24 +900,36 @@ class MailManager:
             self.log_event("info", "account", "assign_group", email_addr, "修改邮箱分组", {"group_name": normalized})
 
     def batch_assign_group(self, emails: list[str], group_name: str) -> int:
-        changed = 0
         with self.lock:
             normalized = self._normalize_group_name(group_name)
             if normalized != "未分组" and not any(
                 item.name == normalized for item in self.settings.custom_groups
             ):
                 raise ValueError("分组不存在，请先创建")
+            targets: list[MailAccount] = []
+            seen: set[str] = set()
             for email_addr in emails:
+                if email_addr in seen:
+                    continue
                 account = self.find_account(email_addr)
                 if not account:
                     continue
-                self._ensure_account_not_locked(account, "转移分组")
+                seen.add(email_addr)
+                targets.append(account)
+            self._ensure_accounts_not_locked(targets, "转移分组")
+            for account in targets:
                 account.group_name = normalized
-                changed += 1
-            if changed:
+            if targets:
                 self._save_accounts_state()
-                self.log_event("info", "account", "batch_assign_group", normalized, "批量修改邮箱分组", {"emails": emails})
-        return changed
+                self.log_event(
+                    "info",
+                    "account",
+                    "batch_assign_group",
+                    normalized,
+                    "批量修改邮箱分组",
+                    {"emails": [item.email for item in targets]},
+                )
+            return len(targets)
 
     def create_tag(self, tag_name: str, color: str = "#BFDBFE", priority: int = 100) -> list[dict]:
         with self.lock:
@@ -1045,7 +1073,7 @@ class MailManager:
             item.is_starred = (not item.is_starred) if is_starred is None else bool(is_starred)
             account = self.find_account(item.account_email)
             if account:
-                self.storage.save_mail_cache(account)
+                self.storage.upsert_mail_item(account.email, item)
             self.log_event("info", "mail", "star", item.local_key, "更新邮件星标", {"is_starred": item.is_starred})
             return item.is_starred
 
@@ -1077,6 +1105,16 @@ class MailManager:
                 raise ValueError("邮箱格式无效")
             if new_email != original_email and self.find_account(new_email):
                 raise ValueError("该邮箱已存在")
+            next_group = self._normalize_group_name(
+                str(payload.get("group_name", account.group_name))
+            )
+            if next_group != "未分组" and not any(
+                item.name == next_group for item in self.settings.custom_groups
+            ):
+                raise ValueError("分组不存在，请先创建")
+            if next_group != account.group_name:
+                self._ensure_account_not_locked(account, "转移分组")
+            email_changed = new_email != original_email
             account.email = new_email
             account.password = str(payload.get("password", account.password))
             account.auth_code_or_client_id = str(
@@ -1085,11 +1123,6 @@ class MailManager:
             account.token = str(payload.get("token", account.token))
             account.imap_host = str(payload.get("imap_host", account.imap_host))
             account.imap_port = int(payload.get("imap_port", account.imap_port) or account.imap_port)
-            next_group = self._normalize_group_name(
-                str(payload.get("group_name", account.group_name))
-            )
-            if next_group != account.group_name:
-                self._ensure_account_not_locked(account, "转移分组")
             account.group_name = next_group
             account.flag_color = str(payload.get("flag_color", account.flag_color))
             account.note = str(payload.get("note", account.note) or "").strip()
@@ -1113,6 +1146,24 @@ class MailManager:
             account.cached_access_expire_at = 0.0
             account.cached_graph_access_token = ""
             account.cached_graph_access_expire_at = 0.0
+            if email_changed:
+                old_prefix = f"{original_email}|"
+                new_prefix = f"{new_email}|"
+                for mail in account.mails:
+                    mail.account_email = new_email
+                    if mail.local_key.startswith(old_prefix):
+                        mail.local_key = new_prefix + mail.local_key[len(old_prefix):]
+                self.local_read_keys = {
+                    (new_prefix + key[len(old_prefix):]) if key.startswith(old_prefix) else key
+                    for key in self.local_read_keys
+                }
+                self.body_tasks = {
+                    ((new_prefix + key[len(old_prefix):]) if key.startswith(old_prefix) else key): value
+                    for key, value in self.body_tasks.items()
+                }
+                self.storage.remove_mail_cache(original_email)
+                self.storage.save_mail_cache(account)
+                self.storage.save_read_state(self.local_read_keys)
             self._save_accounts_state()
             self.rebuild_mail_pool()
             self.log_event("info", "account", "update", new_email, "编辑账号", {"original_email": original_email})
@@ -1212,6 +1263,17 @@ class MailManager:
         self._send_telegram_message(text)
         self.log_event("info", "notification", "manual_send", "telegram", "API 手动发送通知", {"title": title})
 
+    def _resolve_backup_dir(self, directory_setting: str) -> Path:
+        raw_value = (directory_setting or "backups").strip() or "backups"
+        base_root = self.storage.base_dir.resolve()
+        candidate = Path(raw_value)
+        if not candidate.is_absolute():
+            candidate = base_root / candidate
+        resolved = candidate.resolve()
+        if not resolved.is_relative_to(base_root):
+            raise ValueError("备份目录必须位于数据目录内，禁止使用越界路径")
+        return resolved
+
     def update_settings(self, payload: dict) -> dict:
         with self.lock:
             old_telegram_signature = (
@@ -1268,11 +1330,14 @@ class MailManager:
             self.settings.backup_interval_minutes = int(
                 payload.get("backup_interval_minutes", self.settings.backup_interval_minutes) or 1440
             )
-            self.settings.backup_directory = str(
+            backup_dir_raw = str(
                 payload.get("backup_directory", self.settings.backup_directory) or "backups"
-            )
-            self.settings.backup_keep_count = int(
-                payload.get("backup_keep_count", self.settings.backup_keep_count) or 10
+            ).strip() or "backups"
+            self._resolve_backup_dir(backup_dir_raw)
+            self.settings.backup_directory = backup_dir_raw
+            self.settings.backup_keep_count = max(
+                1,
+                int(payload.get("backup_keep_count", self.settings.backup_keep_count) or 10),
             )
             self.settings.oauth_client_id = str(
                 payload.get("oauth_client_id", self.settings.oauth_client_id) or ""
@@ -1309,6 +1374,20 @@ class MailManager:
             )
             self.settings.telegram_notify_backup = bool(
                 payload.get("telegram_notify_backup", self.settings.telegram_notify_backup)
+            )
+            translate_provider = normalize_translate_provider(
+                payload.get("translate_provider", self.settings.translate_provider)
+            )
+            self.settings.translate_provider = translate_provider
+            self.settings.translate_api_key = str(
+                payload.get("translate_api_key", self.settings.translate_api_key) or ""
+            ).strip()
+            self.settings.translate_model = normalize_translate_model(
+                translate_provider,
+                payload.get("translate_model", self.settings.translate_model),
+            )
+            self.settings.translate_fallback_to_free = bool(
+                payload.get("translate_fallback_to_free", self.settings.translate_fallback_to_free)
             )
 
             groups_raw = payload.get("custom_groups", settings_to_dict(self.settings)["custom_groups"])
@@ -1373,7 +1452,7 @@ class MailManager:
                 account = self.find_account(item.account_email)
                 if account:
                     account.unseen_count = max(0, account.unseen_count - 1)
-                    self.storage.save_mail_cache(account)
+                    self.storage.upsert_mail_item(account.email, item)
                 self.storage.save_read_state(self.local_read_keys)
             body_task = self.body_tasks.get(local_key)
             if item.body_text:
@@ -1430,7 +1509,7 @@ class MailManager:
             item.body_html = body_html
             account = self.find_account(item.account_email)
             if account:
-                self.storage.save_mail_cache(account)
+                self.storage.upsert_mail_item(account.email, item)
             self.log_event("info", "mail_body", "raw_load_success", local_key, "原始正文加载成功", {"source": source, "size": size, "duration": duration})
             return {"mail": self.serialize_mail(item)}
 
@@ -1472,9 +1551,10 @@ class MailManager:
                         "graph": graph_message,
                     }
                 )
-            self._save_accounts_state()
-            self.last_token_refresh_run_at = time.time()
-            self._persist_scheduler_state()
+            with self.lock:
+                self._save_accounts_state()
+                self.last_token_refresh_run_at = time.time()
+                self._persist_scheduler_state()
             summary = {
                 "total": len(accounts),
                 "success_count": success_count,
@@ -1515,51 +1595,75 @@ class MailManager:
         file_name = f"easymail-export-{self._now_shanghai().strftime('%Y%m%d-%H%M%S')}.txt"
         return ("\n".join(lines), file_name)
 
-    def backup_accounts_now(self, trigger_source: str = "manual") -> dict:
+    def backup_accounts_now(
+        self,
+        trigger_source: str = "manual",
+        *,
+        include_accounts: bool = True,
+        include_settings: bool = True,
+        include_taxonomy: bool = True,
+        include_logs: bool = False,
+    ) -> dict:
         with self.lock:
             if self.backup_running:
                 raise ValueError("备份任务正在执行")
             self.backup_running = True
-            accounts_payload = [account_to_dict(account) for account in self.accounts]
+            accounts_payload = [account_to_dict(account) for account in self.accounts] if include_accounts else []
             settings_payload = settings_to_dict(self.settings)
+            if not include_taxonomy:
+                settings_payload["custom_groups"] = []
+                settings_payload["custom_tags"] = []
+            account_lines = (
+                [
+                    f"{account.email}---{account.password}---{account.auth_code_or_client_id}---{account.token}"
+                    for account in self.accounts
+                ]
+                if include_accounts
+                else []
+            )
             directory_setting = self.settings.backup_directory.strip() or "backups"
             keep_count = max(1, self.settings.backup_keep_count)
         try:
-            backup_dir = Path(directory_setting)
-            if not backup_dir.is_absolute():
-                backup_dir = self.storage.base_dir / backup_dir
+            backup_dir = self._resolve_backup_dir(directory_setting)
             backup_dir.mkdir(parents=True, exist_ok=True)
             shanghai_now = self._now_shanghai()
             timestamp = shanghai_now.strftime('%Y%m%d-%H%M%S')
             file_path = backup_dir / f"easymail-backup-{timestamp}.zip"
-            account_lines = [
-                f"{account.email}---{account.password}---{account.auth_code_or_client_id}---{account.token}"
-                for account in self.accounts
-            ]
+            files_list: list[str] = []
+            if include_accounts:
+                files_list.extend(["accounts-plain.txt", "accounts.json"])
+            if include_settings or include_taxonomy:
+                files_list.append("settings.json")
+            if include_logs:
+                files_list.append("logs.json")
             manifest = {
                 "app": "EasyMail",
                 "created_at": shanghai_now.isoformat(),
                 "trigger_source": trigger_source,
                 "account_count": len(accounts_payload),
-                "files": [
-                    "accounts-plain.txt",
-                    "accounts.json",
-                    "settings.json",
-                ],
+                "files": files_list,
             }
             with zipfile.ZipFile(file_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                archive.writestr(
-                    "accounts-plain.txt",
-                    "\n".join(account_lines),
-                )
-                archive.writestr(
-                    "accounts.json",
-                    json.dumps(accounts_payload, ensure_ascii=False, indent=2),
-                )
-                archive.writestr(
-                    "settings.json",
-                    json.dumps(settings_payload, ensure_ascii=False, indent=2),
-                )
+                if include_accounts:
+                    archive.writestr(
+                        "accounts-plain.txt",
+                        "\n".join(account_lines),
+                    )
+                    archive.writestr(
+                        "accounts.json",
+                        json.dumps(accounts_payload, ensure_ascii=False, indent=2),
+                    )
+                if include_settings or include_taxonomy:
+                    archive.writestr(
+                        "settings.json",
+                        json.dumps(settings_payload, ensure_ascii=False, indent=2),
+                    )
+                if include_logs:
+                    logs_payload = self.storage.list_logs(limit=1000)
+                    archive.writestr(
+                        "logs.json",
+                        json.dumps(logs_payload, ensure_ascii=False, indent=2),
+                    )
                 archive.writestr(
                     "manifest.json",
                     json.dumps(manifest, ensure_ascii=False, indent=2),
@@ -1736,111 +1840,138 @@ class MailManager:
     def login_worker(self) -> None:
         while True:
             _, _, account = self.login_q.get()
-            with self.lock:
-                self.login_busy_email = account.email
-                account.status = "登录中"
-            success, method, err = probe_account_login(account)
-            with self.lock:
-                if success:
-                    account.status = "登录成功"
-                    account.auth_method = method or "-"
-                    account.last_error = ""
-                    self.enqueue_receive(account, priority=20)
-                    self.log_event("info", "auth", "login_success", account.email, "邮箱登录成功", {"method": method or "-"})
-                else:
+            try:
+                with self.lock:
+                    self.login_busy_email = account.email
+                    account.status = "登录中"
+                success, method, err = probe_account_login(account)
+                with self.lock:
+                    if success:
+                        account.status = "登录成功"
+                        account.auth_method = method or "-"
+                        account.last_error = ""
+                        self.enqueue_receive(account, priority=20)
+                        self.log_event("info", "auth", "login_success", account.email, "邮箱登录成功", {"method": method or "-"})
+                    else:
+                        account.status = "登录失败"
+                        account.last_error = err
+                        self.log_event("error", "auth", "login_failed", account.email, "邮箱登录失败", {"error": err})
+                    account.last_check = format_shanghai_time(self._now_shanghai())
+                    self._save_accounts_state()
+            except Exception as exc:
+                with self.lock:
                     account.status = "登录失败"
-                    account.last_error = err
-                    self.log_event("error", "auth", "login_failed", account.email, "邮箱登录失败", {"error": err})
-                account.last_check = format_shanghai_time(self._now_shanghai())
-                self._save_accounts_state()
-                self.login_done += 1
-                self.login_busy_email = ""
-                self.queued_login.discard(account.email)
+                    account.last_error = str(exc)
+                    account.last_check = format_shanghai_time(self._now_shanghai())
+                self.log_event("error", "auth", "login_worker_error", account.email, "登录队列异常", {"error": str(exc)})
+            finally:
+                with self.lock:
+                    self.login_done += 1
+                    self.login_busy_email = ""
+                    self.queued_login.discard(account.email)
 
     def receive_worker(self) -> None:
         while True:
             _, _, account = self.receive_q.get()
-            with self.lock:
-                self.receive_busy_email = account.email
-                account.status = "收信中"
-                existing_mails = list(account.mails)
-                local_read_keys = set(self.local_read_keys)
-                existing_keys = {item.local_key for item in existing_mails}
-            unseen, mails, message = fetch_mails_once(account, local_read_keys, existing_mails)
-            with self.lock:
-                account.unseen_count = unseen
-                account.mails = mails
-                account.last_check = format_shanghai_time(self._now_shanghai())
-                new_items = [item for item in mails if item.local_key not in existing_keys]
-                codes_changed = any(self.refresh_verification_codes(item) for item in mails)
-                auto_body_queued = 0
-                if "成功" in message:
-                    for item in new_items:
-                        if not item.body_text:
-                            self.enqueue_body(account, item)
-                            auto_body_queued += 1
-                    account.status = "登录成功"
-                    account.last_error = ""
-                    self._queue_mail_notifications(account, new_items)
-                    self.log_event("info", "mail_fetch", "receive_success", account.email, "收件成功", {"unseen": unseen, "method": account.auth_method})
-                else:
+            try:
+                with self.lock:
+                    self.receive_busy_email = account.email
+                    account.status = "收信中"
+                    existing_mails = list(account.mails)
+                    local_read_keys = set(self.local_read_keys)
+                    existing_keys = {item.local_key for item in existing_mails}
+                unseen, mails, message = fetch_mails_once(account, local_read_keys, existing_mails)
+                with self.lock:
+                    account.unseen_count = unseen
+                    account.mails = mails
+                    account.last_check = format_shanghai_time(self._now_shanghai())
+                    new_items = [item for item in mails if item.local_key not in existing_keys]
+                    codes_changed = any(self.refresh_verification_codes(item) for item in mails)
+                    auto_body_queued = 0
+                    if "成功" in message:
+                        for item in new_items:
+                            if not item.body_text:
+                                self.enqueue_body(account, item)
+                                auto_body_queued += 1
+                        account.status = "登录成功"
+                        account.last_error = ""
+                        self._queue_mail_notifications(account, new_items)
+                        self.log_event("info", "mail_fetch", "receive_success", account.email, "收件成功", {"unseen": unseen, "method": account.auth_method})
+                    else:
+                        account.status = "收信失败"
+                        account.last_error = message
+                        self.log_event("error", "mail_fetch", "receive_failed", account.email, "收件失败", {"error": message})
+                    self.storage.save_mail_cache(account)
+                    if codes_changed:
+                        self.log_event("info", "verification", "extract_headers", account.email, "验证码标题提取完成")
+                    if auto_body_queued:
+                        self.log_event("info", "mail_body", "auto_body_queue", account.email, "新邮件正文已自动排队", {"queued": auto_body_queued})
+                    self._save_accounts_state()
+                    self.rebuild_mail_pool()
+            except Exception as exc:
+                with self.lock:
                     account.status = "收信失败"
-                    account.last_error = message
-                    self.log_event("error", "mail_fetch", "receive_failed", account.email, "收件失败", {"error": message})
-                self.storage.save_mail_cache(account)
-                if codes_changed:
-                    self.log_event("info", "verification", "extract_headers", account.email, "验证码标题提取完成")
-                if auto_body_queued:
-                    self.log_event("info", "mail_body", "auto_body_queue", account.email, "新邮件正文已自动排队", {"queued": auto_body_queued})
-                self._save_accounts_state()
-                self.rebuild_mail_pool()
-                self.receive_done += 1
-                self.receive_busy_email = ""
-                self.queued_receive.discard(account.email)
+                    account.last_error = str(exc)
+                    account.last_check = format_shanghai_time(self._now_shanghai())
+                self.log_event("error", "mail_fetch", "receive_worker_error", account.email, "收件队列异常", {"error": str(exc)})
+            finally:
+                with self.lock:
+                    self.receive_done += 1
+                    self.receive_busy_email = ""
+                    self.queued_receive.discard(account.email)
 
     def body_worker(self) -> None:
         while True:
             account, item = self.body_q.get()
-            with self.lock:
-                self.body_tasks[item.local_key] = BodyTask(
-                    state="downloading",
-                    status="正在下载正文",
-                )
+            try:
+                with self.lock:
+                    self.body_tasks[item.local_key] = BodyTask(
+                        state="downloading",
+                        status="正在下载正文",
+                    )
 
-            def progress_callback(downloaded: int, total: int, speed_kb_s: float) -> None:
+                def progress_callback(downloaded: int, total: int, speed_kb_s: float) -> None:
+                    with self.lock:
+                        task = self.body_tasks.setdefault(item.local_key, BodyTask())
+                        task.state = "downloading"
+                        task.downloaded = downloaded
+                        task.total = total
+                        task.speed_kb_s = speed_kb_s
+                        task.status = "正在下载正文"
+
+                body, status, size, duration = fetch_mail_body(
+                    account,
+                    item.msg_id,
+                    item.folder,
+                    item.source,
+                    progress_callback=progress_callback,
+                    mode="text",
+                )
                 with self.lock:
                     task = self.body_tasks.setdefault(item.local_key, BodyTask())
-                    task.state = "downloading"
-                    task.downloaded = downloaded
-                    task.total = total
-                    task.speed_kb_s = speed_kb_s
-                    task.status = "正在下载正文"
-
-            body, status, size, duration = fetch_mail_body(
-                account,
-                item.msg_id,
-                item.folder,
-                item.source,
-                progress_callback=progress_callback,
-                mode="text",
-            )
-            with self.lock:
-                task = self.body_tasks.setdefault(item.local_key, BodyTask())
-                task.size = size
-                task.duration = duration
-                task.status = status
-                if status == "OK":
-                    item.body_text = body
-                    codes_changed = self.refresh_verification_codes(item)
-                    task.state = "done"
-                    task.downloaded = size
-                    task.total = size
-                    task.status = "正文已缓存"
-                    self.storage.save_mail_cache(account)
-                    self.log_event("info", "mail_body", "load_success", item.local_key, "邮件正文加载成功", {"source": item.source, "size": size})
-                    if codes_changed and item.verification_codes:
-                        self.log_event("info", "verification", "extract_body", item.local_key, "验证码正文提取完成", {"codes": len(item.verification_codes)})
-                else:
+                    task.size = size
+                    task.duration = duration
+                    task.status = status
+                    if status == "OK":
+                        item.body_text = body
+                        codes_changed = self.refresh_verification_codes(item)
+                        task.state = "done"
+                        task.downloaded = size
+                        task.total = size
+                        task.status = "正文已缓存"
+                        self.storage.upsert_mail_item(account.email, item)
+                        self.log_event("info", "mail_body", "load_success", item.local_key, "邮件正文加载成功", {"source": item.source, "size": size})
+                        if codes_changed and item.verification_codes:
+                            self.log_event("info", "verification", "extract_body", item.local_key, "验证码正文提取完成", {"codes": len(item.verification_codes)})
+                    else:
+                        task.state = "error"
+                        self.log_event("error", "mail_body", "load_failed", item.local_key, "邮件正文加载失败", {"error": status, "source": item.source})
+            except Exception as exc:
+                with self.lock:
+                    task = self.body_tasks.setdefault(item.local_key, BodyTask())
                     task.state = "error"
-                    self.log_event("error", "mail_body", "load_failed", item.local_key, "邮件正文加载失败", {"error": status, "source": item.source})
-                self.queued_body.discard(item.local_key)
+                    task.status = str(exc)
+                self.log_event("error", "mail_body", "body_worker_error", item.local_key, "正文队列异常", {"error": str(exc)})
+            finally:
+                with self.lock:
+                    self.queued_body.discard(item.local_key)

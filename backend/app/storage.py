@@ -20,15 +20,24 @@ from .models import (
 
 
 class SqliteStorage:
+    MAX_APP_LOGS = 5000
+    MAX_REFRESH_HISTORY = 200
+
     def __init__(self, base_dir: Path) -> None:
         self.base_dir = base_dir
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.base_dir / "easymail.db"
+        self._log_write_count = 0
         self._initialize()
 
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat()
+
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path, check_same_thread=False)
+        connection = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 30000;")
         return connection
 
     def _initialize(self) -> None:
@@ -132,7 +141,7 @@ class SqliteStorage:
         return accounts
 
     def save_accounts(self, accounts: list[MailAccount]) -> None:
-        now = dt.datetime.utcnow().isoformat()
+        now = self._utc_now_iso()
         with self._connect() as connection:
             connection.execute("DELETE FROM accounts")
             connection.executemany(
@@ -164,7 +173,7 @@ class SqliteStorage:
         return settings_from_dict(payload)
 
     def save_settings(self, settings: AppSettings) -> None:
-        now = dt.datetime.utcnow().isoformat()
+        now = self._utc_now_iso()
         payload = json.dumps(settings_to_dict(settings), ensure_ascii=False)
         with self._connect() as connection:
             connection.execute(
@@ -184,7 +193,7 @@ class SqliteStorage:
         return {str(row["local_key"]) for row in rows}
 
     def save_read_state(self, read_keys: set[str]) -> None:
-        now = dt.datetime.utcnow().isoformat()
+        now = self._utc_now_iso()
         with self._connect() as connection:
             connection.execute("DELETE FROM read_state")
             connection.executemany(
@@ -218,7 +227,7 @@ class SqliteStorage:
         return mails
 
     def save_mail_cache(self, account: MailAccount) -> None:
-        now = dt.datetime.utcnow().isoformat()
+        now = self._utc_now_iso()
         with self._connect() as connection:
             connection.execute(
                 "DELETE FROM mail_cache WHERE account_email = ?",
@@ -226,7 +235,7 @@ class SqliteStorage:
             )
             connection.executemany(
                 """
-                INSERT INTO mail_cache(local_key, account_email, payload, date_value, updated_at)
+                INSERT OR REPLACE INTO mail_cache(local_key, account_email, payload, date_value, updated_at)
                 VALUES(?, ?, ?, ?, ?)
                 """,
                 [
@@ -239,6 +248,28 @@ class SqliteStorage:
                     )
                     for item in account.mails
                 ],
+            )
+
+    def upsert_mail_item(self, account_email: str, item: MailItem) -> None:
+        now = self._utc_now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO mail_cache(local_key, account_email, payload, date_value, updated_at)
+                VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(local_key) DO UPDATE SET
+                    account_email = excluded.account_email,
+                    payload = excluded.payload,
+                    date_value = excluded.date_value,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    item.local_key,
+                    account_email,
+                    json.dumps(mail_item_to_dict(item), ensure_ascii=False),
+                    item.date_value.isoformat(),
+                    now,
+                ),
             )
 
     def remove_mail_cache(self, email_addr: str) -> None:
@@ -261,10 +292,19 @@ class SqliteStorage:
             connection.execute(
                 "INSERT INTO refresh_history(created_at, trigger_source, payload) VALUES(?, ?, ?)",
                 (
-                    dt.datetime.utcnow().isoformat(),
+                    self._utc_now_iso(),
                     trigger_source,
                     json.dumps(payload, ensure_ascii=False),
                 ),
+            )
+            connection.execute(
+                """
+                DELETE FROM refresh_history
+                WHERE id NOT IN (
+                    SELECT id FROM refresh_history ORDER BY id DESC LIMIT ?
+                )
+                """,
+                (self.MAX_REFRESH_HISTORY,),
             )
 
     def load_refresh_history(self, limit: int = 20) -> list[dict[str, Any]]:
@@ -295,7 +335,7 @@ class SqliteStorage:
         return records
 
     def save_task_state(self, key: str, value: dict[str, Any]) -> None:
-        now = dt.datetime.utcnow().isoformat()
+        now = self._utc_now_iso()
         with self._connect() as connection:
             connection.execute(
                 """
@@ -336,6 +376,8 @@ class SqliteStorage:
             detail_payload = detail
         else:
             detail_payload = json.dumps(detail or {}, ensure_ascii=False)
+        self._log_write_count += 1
+        should_prune = self._log_write_count % 100 == 0
         with self._connect() as connection:
             connection.execute(
                 """
@@ -343,7 +385,7 @@ class SqliteStorage:
                 VALUES(?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    dt.datetime.utcnow().isoformat(),
+                    self._utc_now_iso(),
                     level,
                     category,
                     action,
@@ -352,6 +394,16 @@ class SqliteStorage:
                     detail_payload,
                 ),
             )
+            if should_prune:
+                connection.execute(
+                    """
+                    DELETE FROM app_logs
+                    WHERE id NOT IN (
+                        SELECT id FROM app_logs ORDER BY id DESC LIMIT ?
+                    )
+                    """,
+                    (self.MAX_APP_LOGS,),
+                )
 
     def list_logs(
         self,
@@ -407,7 +459,7 @@ class SqliteStorage:
         return items
 
     def create_api_token(self, token_id: str, name: str, token_hash: str, scopes: list[str]) -> dict[str, Any]:
-        now = dt.datetime.utcnow().isoformat()
+        now = self._utc_now_iso()
         with self._connect() as connection:
             connection.execute(
                 """
@@ -460,7 +512,7 @@ class SqliteStorage:
                 SET last_used_at = ?, last_used_ip = ?
                 WHERE id = ?
                 """,
-                (dt.datetime.utcnow().isoformat(), ip_address, token_id),
+                (self._utc_now_iso(), ip_address, token_id),
             )
 
     def list_api_tokens(self) -> list[dict[str, Any]]:

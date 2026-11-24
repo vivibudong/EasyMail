@@ -12,7 +12,7 @@ security = HTTPBearer(auto_error=False)
 
 
 def create_access_token(email: str) -> str:
-    now = dt.datetime.utcnow()
+    now = dt.datetime.now(dt.timezone.utc)
     payload = {
         "sub": email,
         "role": "admin",

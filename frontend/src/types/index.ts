@@ -69,6 +69,7 @@ export interface MailItem {
   is_unread: boolean
   is_starred: boolean
   has_body: boolean
+  body_preview?: string
   body_text: string
   body_html: string
   verification_codes: VerificationCode[]
@@ -128,6 +129,20 @@ export interface AppSettings {
   telegram_mail_groups: string[]
   telegram_mail_summary_minutes: number
   telegram_notify_backup: boolean
+  translate_provider: string
+  translate_api_key: string
+  translate_model: string
+  translate_fallback_to_free: boolean
+}
+
+export interface TranslateProviderOption {
+  id: string
+  label: string
+  requires_api_key: boolean
+  default_model: string
+  models: string[]
+  docs_url: string
+  description: string
 }
 
 export interface AuthUser {

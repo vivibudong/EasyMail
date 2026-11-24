@@ -82,6 +82,112 @@
           </div>
         </section>
 
+        <section v-else-if="currentSection === 'translate'" class="card">
+          <div class="card-header">
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">翻译配置</h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
+              默认使用免费聚合翻译（Google POST 分段 + 备用通道 / MyMemory 自动降级），也可通过下拉菜单切换官方翻译 API。
+            </p>
+          </div>
+
+          <div class="card-body grid gap-5 md:grid-cols-2">
+            <label class="space-y-2 md:col-span-2">
+              <span class="input-label mb-0">翻译引擎</span>
+              <select v-model="form.translate_provider" class="input">
+                <option
+                  v-for="provider in translateProviders"
+                  :key="provider.id"
+                  :value="provider.id"
+                >
+                  {{ provider.label }}
+                </option>
+              </select>
+              <p v-if="selectedTranslateProvider" class="text-xs text-gray-500 dark:text-dark-400">
+                {{ selectedTranslateProvider.description }}
+              </p>
+            </label>
+
+            <template v-if="selectedTranslateProvider?.requires_api_key">
+              <label class="space-y-2 md:col-span-2">
+                <span class="input-label mb-0">API Key</span>
+                <div class="flex gap-2">
+                  <input
+                    v-model.trim="form.translate_api_key"
+                    class="input flex-1 font-mono text-xs"
+                    :type="showTranslateApiKey ? 'text' : 'password'"
+                    autocomplete="off"
+                    placeholder="请填写所选翻译服务的官方 API Key"
+                  />
+                  <button
+                    type="button"
+                    class="btn btn-secondary btn-sm shrink-0"
+                    @click="showTranslateApiKey = !showTranslateApiKey"
+                  >
+                    {{ showTranslateApiKey ? '隐藏' : '显示' }}
+                  </button>
+                </div>
+              </label>
+
+              <label v-if="selectedTranslateProvider.models.length" class="space-y-2 md:col-span-2">
+                <span class="input-label mb-0">翻译模型</span>
+                <select v-model="form.translate_model" class="input">
+                  <option
+                    v-for="modelName in selectedTranslateProvider.models"
+                    :key="modelName"
+                    :value="modelName"
+                  >
+                    {{ modelName }}
+                  </option>
+                </select>
+              </label>
+
+              <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-dark-300 md:col-span-2">
+                <input v-model="form.translate_fallback_to_free" type="checkbox" />
+                自定义 API 调用失败或未填写密钥时，自动降级到免费聚合翻译
+              </label>
+            </template>
+
+            <div class="space-y-2 rounded-xl border border-gray-200 bg-gray-50/70 p-4 dark:border-dark-700 dark:bg-dark-800/50 md:col-span-2">
+              <div class="text-xs font-semibold text-gray-700 dark:text-dark-200">
+                常用翻译 API 申请与官方文档
+              </div>
+              <div class="grid gap-2 sm:grid-cols-2">
+                <a
+                  v-for="link in translateApiDocLinks"
+                  :key="link.label"
+                  :href="link.url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-sky-700 transition-colors hover:border-sky-300 hover:bg-sky-50/60 dark:border-dark-700 dark:bg-dark-800 dark:text-sky-300 dark:hover:border-sky-700"
+                >
+                  <span>
+                    <span class="block font-medium">{{ link.label }}</span>
+                    <span class="mt-0.5 block text-[11px] text-gray-500 dark:text-dark-400">{{ link.note }}</span>
+                  </span>
+                  <span class="ml-2 shrink-0 text-[11px]">前往 ↗</span>
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <div class="card-footer space-y-3">
+            <div class="flex flex-wrap items-center gap-3">
+              <button class="btn btn-secondary" :disabled="testingTranslation" @click="handleTestTranslation">
+                {{ testingTranslation ? '测试中...' : '测试翻译' }}
+              </button>
+              <div class="text-xs text-gray-500 dark:text-dark-400">
+                测试将直接验证当前选中的翻译引擎与密钥（测试时不做静默降级）。
+              </div>
+            </div>
+            <div
+              v-if="translateTestResult"
+              class="rounded-xl border border-emerald-200 bg-emerald-50/70 px-3 py-2 text-xs text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-900/10 dark:text-emerald-200"
+            >
+              {{ translateTestResult }}
+            </div>
+          </div>
+        </section>
+
         <section v-else-if="currentSection === 'oauth'" class="card">
           <div class="card-header">
             <h2 class="text-lg font-semibold text-gray-900 dark:text-white">微软授权配置</h2>
@@ -483,29 +589,126 @@ import {
   getApiTokens,
   getSettings,
   getTokenRefreshHistory,
+  getTranslateProviders,
   restoreAccountBackup,
   runAccountBackup,
   runTokenRefresh,
   saveSettings,
   sendTestNotification,
+  testTranslateService,
   type ApiTokenItem,
 } from '@/api/dashboard'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useToastStore } from '@/stores/toast'
-import type { AppSettings } from '@/types'
+import type { AppSettings, TranslateProviderOption } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
 const sections = [
   { key: 'import', label: '导入规则' },
   { key: 'reading', label: '阅读偏好' },
+  { key: 'translate', label: '翻译配置' },
   { key: 'oauth', label: '微软授权' },
   { key: 'notifications', label: '通知' },
   { key: 'refresh', label: '邮箱刷新' },
   { key: 'backup', label: '备份' },
   { key: 'security', label: '安全' },
   { key: 'api', label: 'API' },
+]
+
+const defaultTranslateProviders: TranslateProviderOption[] = [
+  {
+    id: 'free',
+    label: '免费聚合翻译（默认：Google POST + 备用源自动降级）',
+    requires_api_key: false,
+    default_model: '',
+    models: [],
+    docs_url: '',
+    description: '免密钥开箱即用，自动分段并通过 POST 请求 Google 翻译，失败时自动降级到备用通道与 MyMemory。',
+  },
+  {
+    id: 'deepl_free',
+    label: 'DeepL API Free（免费版每月 50 万字符）',
+    requires_api_key: true,
+    default_model: '',
+    models: [],
+    docs_url: 'https://www.deepl.com/zh/pro-api',
+    description: '高质量神经机器翻译，请填写 DeepL API Free 密钥（通常以 :fx 结尾）。',
+  },
+  {
+    id: 'deepl_pro',
+    label: 'DeepL API Pro（付费专业版）',
+    requires_api_key: true,
+    default_model: '',
+    models: [],
+    docs_url: 'https://www.deepl.com/zh/pro-api',
+    description: '使用 DeepL API Pro 正式密钥进行翻译。',
+  },
+  {
+    id: 'deepseek',
+    label: 'DeepSeek 官方 API（中文自然、性价比高）',
+    requires_api_key: true,
+    default_model: 'deepseek-chat',
+    models: ['deepseek-chat'],
+    docs_url: 'https://platform.deepseek.com/api_keys',
+    description: '使用 DeepSeek 官方 API 进行邮件翻译，国内与海外服务器均可稳定访问。',
+  },
+  {
+    id: 'openai',
+    label: 'OpenAI 官方 API',
+    requires_api_key: true,
+    default_model: 'gpt-4o-mini',
+    models: ['gpt-4o-mini', 'gpt-4.1-mini', 'gpt-4o'],
+    docs_url: 'https://platform.openai.com/api-keys',
+    description: '使用 OpenAI 官方模型翻译长邮件，语义流畅自然。',
+  },
+  {
+    id: 'siliconflow',
+    label: '硅基流动 SiliconFlow',
+    requires_api_key: true,
+    default_model: 'Qwen/Qwen2.5-7B-Instruct',
+    models: ['Qwen/Qwen2.5-7B-Instruct', 'deepseek-ai/DeepSeek-V3'],
+    docs_url: 'https://cloud.siliconflow.cn/account/ak',
+    description: '使用硅基流动官方 API，支持 Qwen / DeepSeek 等开源模型。',
+  },
+  {
+    id: 'google_cloud',
+    label: 'Google Cloud Translation API v2',
+    requires_api_key: true,
+    default_model: '',
+    models: [],
+    docs_url: 'https://cloud.google.com/translate/docs/setup',
+    description: '使用 Google Cloud 官方 Translation v2 API Key。',
+  },
+]
+
+const translateApiDocLinks = [
+  {
+    label: 'DeepL API（Free / Pro）',
+    note: '免费版每月 50 万字符额度',
+    url: 'https://www.deepl.com/zh/pro-api',
+  },
+  {
+    label: 'DeepSeek 开放平台',
+    note: '申请 API Key，中文翻译性价比高',
+    url: 'https://platform.deepseek.com/api_keys',
+  },
+  {
+    label: 'OpenAI Platform',
+    note: '申请 OpenAI API Key（支持 GPT-4o mini）',
+    url: 'https://platform.openai.com/api-keys',
+  },
+  {
+    label: '硅基流动 SiliconFlow',
+    note: '申请 API Key，支持 Qwen / DeepSeek 模型',
+    url: 'https://cloud.siliconflow.cn/account/ak',
+  },
+  {
+    label: 'Google Cloud Translation',
+    note: 'Google 官方 Cloud Translation API 文档',
+    url: 'https://cloud.google.com/translate/docs/setup',
+  },
 ]
 
 const form = reactive<AppSettings>({
@@ -536,11 +739,19 @@ const form = reactive<AppSettings>({
   telegram_mail_groups: [],
   telegram_mail_summary_minutes: 60,
   telegram_notify_backup: false,
+  translate_provider: 'free',
+  translate_api_key: '',
+  translate_model: '',
+  translate_fallback_to_free: true,
 })
 
 const saving = ref(false)
 const savingSecurity = ref(false)
 const testingNotification = ref(false)
+const testingTranslation = ref(false)
+const translateTestResult = ref('')
+const showTranslateApiKey = ref(false)
+const translateProviders = ref<TranslateProviderOption[]>(defaultTranslateProviders)
 const runningTokenRefresh = ref(false)
 const runningBackup = ref(false)
 const newDelimiter = ref('')
@@ -587,6 +798,23 @@ const notificationGroupOptions = computed(() => [
   { value: '__all__', label: '全部邮箱' },
   ...groupOptions.value.map((group) => ({ value: group, label: group })),
 ])
+const selectedTranslateProvider = computed(
+  () => translateProviders.value.find((item) => item.id === form.translate_provider) || translateProviders.value[0],
+)
+
+watch(
+  () => form.translate_provider,
+  () => {
+    const provider = selectedTranslateProvider.value
+    if (!provider || !provider.models.length) {
+      form.translate_model = ''
+      return
+    }
+    if (!provider.models.includes(form.translate_model)) {
+      form.translate_model = provider.default_model || provider.models[0] || ''
+    }
+  },
+)
 
 const securityForm = reactive({
   email: '',
@@ -599,8 +827,7 @@ onMounted(async () => {
   const response = await getSettings()
   Object.assign(form, response.data)
   securityForm.email = authStore.user?.email || ''
-  await loadTokenRefreshHistory()
-  await loadApiTokens()
+  await Promise.all([loadTranslateProviders(), loadTokenRefreshHistory(), loadApiTokens()])
 })
 
 watch(
@@ -755,6 +982,35 @@ async function copyApiToken() {
   if (!createdApiToken.value) return
   await navigator.clipboard.writeText(createdApiToken.value)
   toastStore.push('API Key 已复制', 'success')
+}
+
+async function loadTranslateProviders() {
+  try {
+    const response = await getTranslateProviders()
+    if (response.data.items.length) {
+      translateProviders.value = response.data.items
+    }
+  } catch {
+    // Keep built-in fallback list when request fails.
+  }
+}
+
+async function handleTestTranslation() {
+  testingTranslation.value = true
+  translateTestResult.value = ''
+  try {
+    const response = await testTranslateService({
+      provider: form.translate_provider,
+      api_key: form.translate_api_key,
+      model: form.translate_model,
+    })
+    translateTestResult.value = `测试成功（${response.data.provider}）：${response.data.translated_text}`
+    toastStore.push(response.message, 'success')
+  } catch (error: any) {
+    toastStore.push(error?.response?.data?.detail || '翻译测试失败', 'error')
+  } finally {
+    testingTranslation.value = false
+  }
 }
 
 async function handleTestNotification() {

@@ -98,6 +98,10 @@ class AppSettings:
     telegram_mail_groups: list[str] = field(default_factory=list)
     telegram_mail_summary_minutes: int = 60
     telegram_notify_backup: bool = False
+    translate_provider: str = "free"
+    translate_api_key: str = ""
+    translate_model: str = ""
+    translate_fallback_to_free: bool = True
 
 
 @dataclass
@@ -247,6 +251,10 @@ def settings_to_dict(settings: AppSettings) -> dict:
         "telegram_mail_groups": normalize_telegram_mail_groups(settings.telegram_mail_groups),
         "telegram_mail_summary_minutes": settings.telegram_mail_summary_minutes,
         "telegram_notify_backup": settings.telegram_notify_backup,
+        "translate_provider": settings.translate_provider,
+        "translate_api_key": settings.translate_api_key,
+        "translate_model": settings.translate_model,
+        "translate_fallback_to_free": settings.translate_fallback_to_free,
     }
 
 
@@ -358,4 +366,8 @@ def settings_from_dict(data: dict) -> AppSettings:
         telegram_mail_groups=telegram_mail_groups,
         telegram_mail_summary_minutes=int(data.get("telegram_mail_summary_minutes", 60) or 60),
         telegram_notify_backup=bool(data.get("telegram_notify_backup", False)),
+        translate_provider=str(data.get("translate_provider", "free") or "free").strip().lower(),
+        translate_api_key=str(data.get("translate_api_key", "") or "").strip(),
+        translate_model=str(data.get("translate_model", "") or "").strip(),
+        translate_fallback_to_free=bool(data.get("translate_fallback_to_free", True)),
     )

@@ -30,6 +30,7 @@ from .config import config, update_admin_credentials
 from .manager import MailManager
 from .models import DEFAULT_IMPORT_DELIMITERS, MailAccount
 from .storage import SqliteStorage
+from .translate import get_public_translate_providers, translate_text_to_chinese
 
 GRAPH_REAUTH_SCOPE = "offline_access openid profile https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read"
 MANUAL_OAUTH_SCOPE = GRAPH_REAUTH_SCOPE
@@ -85,6 +86,72 @@ class GraphReauthSession:
 
 graph_reauth_sessions: dict[str, GraphReauthSession] = {}
 manual_oauth_sessions: dict[str, dict] = {}
+_login_attempts_lock = threading.Lock()
+_login_failed_attempts: dict[str, list[float]] = {}
+LOGIN_RATE_LIMIT_WINDOW_SECONDS = 600
+LOGIN_RATE_LIMIT_MAX_ATTEMPTS = 10
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    return request.client.host if request.client else "unknown"
+
+
+def _check_login_rate_limit(ip: str) -> None:
+    now = time.time()
+    cutoff = now - LOGIN_RATE_LIMIT_WINDOW_SECONDS
+    with _login_attempts_lock:
+        attempts = [ts for ts in _login_failed_attempts.get(ip, []) if ts > cutoff]
+        if attempts:
+            _login_failed_attempts[ip] = attempts
+        else:
+            _login_failed_attempts.pop(ip, None)
+        if len(attempts) >= LOGIN_RATE_LIMIT_MAX_ATTEMPTS:
+            wait_seconds = max(1, int(LOGIN_RATE_LIMIT_WINDOW_SECONDS - (now - attempts[0])))
+            raise HTTPException(
+                status_code=429,
+                detail=f"登录失败次数过多，请 {wait_seconds} 秒后再试",
+            )
+
+
+def _record_login_failure(ip: str) -> None:
+    now = time.time()
+    cutoff = now - LOGIN_RATE_LIMIT_WINDOW_SECONDS
+    with _login_attempts_lock:
+        attempts = [ts for ts in _login_failed_attempts.get(ip, []) if ts > cutoff]
+        attempts.append(now)
+        _login_failed_attempts[ip] = attempts
+        if len(_login_failed_attempts) > 2000:
+            stale_ips = [
+                key
+                for key, vals in _login_failed_attempts.items()
+                if not any(ts > cutoff for ts in vals)
+            ]
+            for key in stale_ips:
+                _login_failed_attempts.pop(key, None)
+
+
+def _clear_login_failures(ip: str) -> None:
+    with _login_attempts_lock:
+        _login_failed_attempts.pop(ip, None)
+
+
+def _prune_oauth_sessions() -> None:
+    now = time.time()
+    expired_graph = [
+        sid for sid, session in list(graph_reauth_sessions.items())
+        if now >= session.expires_at + 60
+    ]
+    for sid in expired_graph:
+        graph_reauth_sessions.pop(sid, None)
+    expired_manual = [
+        sid for sid, session in list(manual_oauth_sessions.items())
+        if now >= float(session.get("expires_at", 0.0) or 0.0) + 60
+    ]
+    for sid in expired_manual:
+        manual_oauth_sessions.pop(sid, None)
 
 
 class LoginRequest(BaseModel):
@@ -199,6 +266,13 @@ class TranslateRequest(BaseModel):
     text: str
 
 
+class TranslateTestRequest(BaseModel):
+    text: str = "Hello, this is an EasyMail translation connectivity test."
+    provider: Optional[str] = None
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+
+
 class ApiTokenCreateRequest(BaseModel):
     name: str
     scopes: list[str] = Field(default_factory=list)
@@ -297,6 +371,10 @@ class SettingsRequest(BaseModel):
     telegram_mail_groups: list[str] = Field(default_factory=list)
     telegram_mail_summary_minutes: int = 60
     telegram_notify_backup: bool = False
+    translate_provider: str = "free"
+    translate_api_key: str = ""
+    translate_model: str = ""
+    translate_fallback_to_free: bool = True
 
 
 def ok(message: str, data: Optional[dict] = None) -> dict:
@@ -704,36 +782,6 @@ def _get_graph_profile(access_token: str) -> dict:
     return payload
 
 
-def _translate_to_chinese(text: str) -> str:
-    query = urllib.parse.urlencode(
-        {
-            "client": "gtx",
-            "sl": "auto",
-            "tl": "zh-CN",
-            "dt": "t",
-            "q": text,
-        }
-    )
-    request = urllib.request.Request(
-        f"https://translate.googleapis.com/translate_a/single?{query}",
-        headers={"Accept": "application/json"},
-        method="GET",
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        raw = response.read().decode("utf-8", errors="replace")
-    payload = json.loads(raw)
-    if not isinstance(payload, list) or not payload or not isinstance(payload[0], list):
-        raise ValueError("翻译服务返回格式异常")
-    translated_parts: list[str] = []
-    for item in payload[0]:
-        if isinstance(item, list) and item:
-            translated_parts.append(str(item[0] or ""))
-    translated_text = "".join(translated_parts).strip()
-    if not translated_text:
-        raise ValueError("翻译结果为空")
-    return translated_text
-
-
 def _apply_graph_reauth_success(session: GraphReauthSession, token_payload: dict) -> None:
     refresh_token = str(token_payload.get("refresh_token", "") or "")
     if not refresh_token:
@@ -863,12 +911,16 @@ def restart_system(current_user: dict = Depends(get_current_user)) -> dict:
 
 
 @app.post("/api/auth/login")
-def login(payload: LoginRequest) -> dict:
+def login(payload: LoginRequest, request: Request) -> dict:
+    client_ip = _client_ip(request)
+    _check_login_rate_limit(client_ip)
     if payload.email != config.admin_email or not config.verify_admin_password(payload.password):
-        manager.log_event("warn", "auth", "login_denied", payload.email, "后台登录失败")
+        _record_login_failure(client_ip)
+        manager.log_event("warn", "auth", "login_denied", payload.email, "后台登录失败", {"ip": client_ip})
         raise HTTPException(status_code=401, detail="邮箱或密码错误")
+    _clear_login_failures(client_ip)
     token = create_access_token(payload.email)
-    manager.log_event("info", "auth", "login_success", payload.email, "后台登录成功")
+    manager.log_event("info", "auth", "login_success", payload.email, "后台登录成功", {"ip": client_ip})
     return ok(
         "登录成功",
         {
@@ -995,11 +1047,14 @@ def relogin_accounts(
     payload: AccountBatchRequest,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    queued = manager.start_relogin_batch(
-        resolve_targets(payload),
-        priority=0 if payload.priority else 50,
-        interrupt_pending=payload.priority,
-    )
+    try:
+        queued = manager.start_relogin_batch(
+            resolve_targets(payload),
+            priority=0 if payload.priority else 50,
+            interrupt_pending=payload.priority,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ok(f"重新登录任务已加入队列，共 {queued} 个邮箱", {"queued": queued})
 
 
@@ -1008,7 +1063,10 @@ def delete_accounts(
     payload: AccountBatchRequest,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    deleted = manager.delete_accounts(set(payload.emails))
+    try:
+        deleted = manager.delete_accounts(set(payload.emails))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ok(f"已删除 {deleted} 个邮箱及其本地缓存", {"deleted": deleted})
 
 
@@ -1184,6 +1242,7 @@ def start_graph_reauth(
     payload: GraphReauthStartRequest,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
+    _prune_oauth_sessions()
     account = manager.find_account(payload.email)
     if not account:
         raise HTTPException(status_code=404, detail="邮箱不存在")
@@ -1245,6 +1304,7 @@ def graph_reauth_status(
     session_id: str = Query(...),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
+    _prune_oauth_sessions()
     session = graph_reauth_sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="授权会话不存在或已过期")
@@ -1259,6 +1319,7 @@ def start_manual_oauth(
     payload: ManualOauthStartRequest,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
+    _prune_oauth_sessions()
     settings = manager.settings
     client_id = settings.oauth_client_id.strip()
     redirect_uri = settings.oauth_redirect_uri.strip()
@@ -1310,6 +1371,7 @@ def complete_manual_oauth(
     payload: ManualOauthCompleteRequest,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
+    _prune_oauth_sessions()
     session = manual_oauth_sessions.get(payload.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="授权会话不存在或已过期")
@@ -1443,6 +1505,8 @@ def update_settings(
         settings = manager.update_settings(payload.model_dump())
     except re.error as exc:
         raise HTTPException(status_code=400, detail=f"分隔符正则无效: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ok("设置已保存", settings)
 
 
@@ -1515,6 +1579,55 @@ def send_test_notification(current_user: dict = Depends(get_current_user)) -> di
     return ok("Telegram 测试通知已发送")
 
 
+@app.get("/api/translate/providers")
+def list_translate_providers(
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    return ok("ok", {"items": get_public_translate_providers()})
+
+
+@app.post("/api/translate/test")
+def test_translate_service(
+    payload: TranslateTestRequest,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    with manager.lock:
+        settings = manager.settings
+        provider = payload.provider if payload.provider is not None else settings.translate_provider
+        api_key = payload.api_key if payload.api_key is not None else settings.translate_api_key
+        model = payload.model if payload.model is not None else settings.translate_model
+    sample_text = (payload.text or "").strip() or "Hello, this is an EasyMail translation connectivity test."
+    try:
+        translated, used_provider = translate_text_to_chinese(
+            sample_text[:2000],
+            provider=provider,
+            api_key=api_key,
+            model=model,
+            fallback_to_free=False,
+        )
+    except Exception as exc:
+        manager.log_event(
+            "error",
+            "translate",
+            "test_failed",
+            provider or "free",
+            "翻译服务测试失败",
+            {"error": str(exc)},
+        )
+        raise HTTPException(status_code=400, detail=f"翻译测试失败: {exc}") from exc
+    manager.log_event(
+        "info",
+        "translate",
+        "test_success",
+        used_provider,
+        "翻译服务测试成功",
+    )
+    return ok(
+        f"翻译测试成功（{used_provider}）",
+        {"translated_text": translated, "provider": used_provider},
+    )
+
+
 @app.post("/api/translate")
 def translate_text(
     payload: TranslateRequest,
@@ -1523,11 +1636,31 @@ def translate_text(
     text = payload.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="正文为空，无法翻译")
+    with manager.lock:
+        settings = manager.settings
+        provider = settings.translate_provider
+        api_key = settings.translate_api_key
+        model = settings.translate_model
+        fallback_to_free = settings.translate_fallback_to_free
     try:
-        translated = _translate_to_chinese(text[:12000])
+        translated, used_provider = translate_text_to_chinese(
+            text,
+            provider=provider,
+            api_key=api_key,
+            model=model,
+            fallback_to_free=fallback_to_free,
+        )
     except Exception as exc:
+        manager.log_event(
+            "error",
+            "translate",
+            "translate_failed",
+            provider or "free",
+            "邮件正文翻译失败",
+            {"error": str(exc), "text_length": len(text)},
+        )
         raise HTTPException(status_code=400, detail=f"翻译失败: {exc}") from exc
-    return ok("翻译完成", {"translated_text": translated})
+    return ok("翻译完成", {"translated_text": translated, "provider": used_provider})
 
 
 @app.get("/api/logs")
@@ -1893,6 +2026,84 @@ def api_v1_delete_tag(
     return api_ok("标签已删除", {"items": tags}, _request_id(request))
 
 
+@app.patch("/api/v1/accounts/batch/group")
+def api_v1_batch_group(
+    request: Request,
+    payload: ApiBatchGroupRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        changed = manager.batch_assign_group(payload.emails, payload.group_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "batch_assign_group", payload.group_name, payload.model_dump())
+    return api_ok("批量分组已更新", {"changed": changed}, _request_id(request))
+
+
+@app.post("/api/v1/accounts/batch/tags")
+def api_v1_batch_add_tags(
+    request: Request,
+    payload: ApiBatchTagsRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        changed = manager.batch_patch_account_tags(payload.emails, payload.tags, "add")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "batch_add_tags", "batch", payload.model_dump())
+    return api_ok("批量标签已添加", {"changed": changed}, _request_id(request))
+
+
+@app.put("/api/v1/accounts/batch/tags")
+def api_v1_batch_replace_tags(
+    request: Request,
+    payload: ApiBatchTagsRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        changed = manager.batch_patch_account_tags(payload.emails, payload.tags, "replace")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "batch_replace_tags", "batch", payload.model_dump())
+    return api_ok("批量标签已覆盖", {"changed": changed}, _request_id(request))
+
+
+@app.delete("/api/v1/accounts/batch/tags")
+def api_v1_batch_remove_tags(
+    request: Request,
+    payload: ApiBatchTagsRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    try:
+        changed = manager.batch_patch_account_tags(payload.emails, payload.tags, "remove")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _api_audit(request, api_user, "batch_remove_tags", "batch", payload.model_dump())
+    return api_ok("批量标签已移除", {"changed": changed}, _request_id(request))
+
+
+@app.patch("/api/v1/accounts/batch/flag")
+def api_v1_batch_set_flag(
+    request: Request,
+    payload: ApiBatchFlagRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    changed = manager.batch_set_flag(payload.emails, payload.flag_color)
+    _api_audit(request, api_user, "batch_set_flag", "batch", payload.model_dump())
+    return api_ok("批量旗标已更新", {"changed": changed}, _request_id(request))
+
+
+@app.delete("/api/v1/accounts/batch/flag")
+def api_v1_batch_clear_flag(
+    request: Request,
+    payload: ApiBatchFlagRequest,
+    api_user: dict = Depends(require_api_scope("write:taxonomy")),
+) -> dict:
+    changed = manager.batch_set_flag(payload.emails, "")
+    _api_audit(request, api_user, "batch_clear_flag", "batch", {"emails": payload.emails})
+    return api_ok("批量旗标已取消", {"changed": changed}, _request_id(request))
+
+
 @app.patch("/api/v1/accounts/{email_addr}/group")
 def api_v1_account_group(
     request: Request,
@@ -1906,20 +2117,6 @@ def api_v1_account_group(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _api_audit(request, api_user, "assign_group", email_addr, payload.model_dump())
     return api_ok("邮箱分组已更新", {"email": email_addr, "group_name": payload.group_name}, _request_id(request))
-
-
-@app.patch("/api/v1/accounts/batch/group")
-def api_v1_batch_group(
-    request: Request,
-    payload: ApiBatchGroupRequest,
-    api_user: dict = Depends(require_api_scope("write:taxonomy")),
-) -> dict:
-    try:
-        changed = manager.batch_assign_group(payload.emails, payload.group_name)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    _api_audit(request, api_user, "batch_assign_group", payload.group_name, payload.model_dump())
-    return api_ok("批量分组已更新", {"changed": changed}, _request_id(request))
 
 
 @app.put("/api/v1/accounts/{email_addr}/tags")
@@ -1967,48 +2164,6 @@ def api_v1_remove_tags(
     return api_ok("邮箱标签已移除", {"email": email_addr, "tags": tags}, _request_id(request))
 
 
-@app.post("/api/v1/accounts/batch/tags")
-def api_v1_batch_add_tags(
-    request: Request,
-    payload: ApiBatchTagsRequest,
-    api_user: dict = Depends(require_api_scope("write:taxonomy")),
-) -> dict:
-    try:
-        changed = manager.batch_patch_account_tags(payload.emails, payload.tags, "add")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    _api_audit(request, api_user, "batch_add_tags", "batch", payload.model_dump())
-    return api_ok("批量标签已添加", {"changed": changed}, _request_id(request))
-
-
-@app.put("/api/v1/accounts/batch/tags")
-def api_v1_batch_replace_tags(
-    request: Request,
-    payload: ApiBatchTagsRequest,
-    api_user: dict = Depends(require_api_scope("write:taxonomy")),
-) -> dict:
-    try:
-        changed = manager.batch_patch_account_tags(payload.emails, payload.tags, "replace")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    _api_audit(request, api_user, "batch_replace_tags", "batch", payload.model_dump())
-    return api_ok("批量标签已覆盖", {"changed": changed}, _request_id(request))
-
-
-@app.delete("/api/v1/accounts/batch/tags")
-def api_v1_batch_remove_tags(
-    request: Request,
-    payload: ApiBatchTagsRequest,
-    api_user: dict = Depends(require_api_scope("write:taxonomy")),
-) -> dict:
-    try:
-        changed = manager.batch_patch_account_tags(payload.emails, payload.tags, "remove")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    _api_audit(request, api_user, "batch_remove_tags", "batch", payload.model_dump())
-    return api_ok("批量标签已移除", {"changed": changed}, _request_id(request))
-
-
 @app.patch("/api/v1/accounts/{email_addr}/flag")
 def api_v1_set_flag(
     request: Request,
@@ -2036,28 +2191,6 @@ def api_v1_clear_flag(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _api_audit(request, api_user, "clear_flag", email_addr)
     return api_ok("旗标已取消", {"email": email_addr, "flag_color": ""}, _request_id(request))
-
-
-@app.patch("/api/v1/accounts/batch/flag")
-def api_v1_batch_set_flag(
-    request: Request,
-    payload: ApiBatchFlagRequest,
-    api_user: dict = Depends(require_api_scope("write:taxonomy")),
-) -> dict:
-    changed = manager.batch_set_flag(payload.emails, payload.flag_color)
-    _api_audit(request, api_user, "batch_set_flag", "batch", payload.model_dump())
-    return api_ok("批量旗标已更新", {"changed": changed}, _request_id(request))
-
-
-@app.delete("/api/v1/accounts/batch/flag")
-def api_v1_batch_clear_flag(
-    request: Request,
-    payload: ApiBatchFlagRequest,
-    api_user: dict = Depends(require_api_scope("write:taxonomy")),
-) -> dict:
-    changed = manager.batch_set_flag(payload.emails, "")
-    _api_audit(request, api_user, "batch_clear_flag", "batch", {"emails": payload.emails})
-    return api_ok("批量旗标已取消", {"changed": changed}, _request_id(request))
 
 
 @app.post("/api/v1/accounts/import")
@@ -2111,7 +2244,10 @@ def api_v1_relogin(
     api_user: dict = Depends(require_api_scope("task:login")),
 ) -> dict:
     targets = _resolve_api_targets(payload)
-    queued = manager.start_relogin_batch(targets, priority=0, interrupt_pending=True)
+    try:
+        queued = manager.start_relogin_batch(targets, priority=0, interrupt_pending=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     _api_audit(request, api_user, "relogin", "batch", {"queued": queued})
     return api_ok("重新登录任务已加入队列", {"queued": queued, "queue": manager.queue_details()}, _request_id(request))
 
@@ -2131,7 +2267,13 @@ def api_v1_backup(
     api_user: dict = Depends(require_api_scope("task:backup")),
 ) -> dict:
     try:
-        result = manager.backup_accounts_now(trigger_source="api")
+        result = manager.backup_accounts_now(
+            trigger_source="api",
+            include_accounts=payload.include_accounts,
+            include_settings=payload.include_settings,
+            include_taxonomy=payload.include_taxonomy,
+            include_logs=payload.include_logs,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _api_audit(request, api_user, "backup", "api", payload.model_dump())
@@ -2182,17 +2324,23 @@ def api_v1_system_version(
 WEB_DIST_DIR = Path("/app/frontend_dist")
 
 if WEB_DIST_DIR.exists():
-    assets_dir = WEB_DIST_DIR / "assets"
+    web_root = WEB_DIST_DIR.resolve()
+    assets_dir = web_root / "assets"
     if assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
     @app.get("/", include_in_schema=False)
     def serve_index() -> FileResponse:
-        return FileResponse(WEB_DIST_DIR / "index.html")
+        return FileResponse(web_root / "index.html")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def serve_spa(full_path: str):
-        candidate = WEB_DIST_DIR / full_path
-        if candidate.is_file():
+        if full_path.startswith("api/") or full_path == "api":
+            raise HTTPException(status_code=404, detail="Not Found")
+        try:
+            candidate = (web_root / full_path).resolve()
+        except Exception:
+            return FileResponse(web_root / "index.html")
+        if candidate.is_relative_to(web_root) and candidate.is_file():
             return FileResponse(candidate)
-        return FileResponse(WEB_DIST_DIR / "index.html")
+        return FileResponse(web_root / "index.html")

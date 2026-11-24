@@ -396,7 +396,7 @@
                     :disabled="translatingBody"
                     @click="handleTranslateBody"
                   >
-                    {{ showingTranslatedBody ? '查看原文' : translatingBody ? '翻译中...' : '翻译正文' }}
+                    {{ showingTranslatedBody && !showingRawBody ? '查看原文' : translatingBody ? '翻译中...' : '翻译正文' }}
                   </button>
                   <button
                     v-if="selectedMailKey"
@@ -1332,6 +1332,8 @@ const flagOptions = [
 ]
 
 let refreshTimer: number | null = null
+let refreshingState = false
+let handleVisibilityChange: (() => void) | null = null
 let bodyTimer: number | null = null
 let graphReauthTimer: number | null = null
 let accountMetaPopoverTimer: number | null = null
@@ -1433,6 +1435,7 @@ function mailMatchesQuery(mail: MailItem, query: string) {
     mail.folder,
     mail.subject,
     mail.from_text,
+    mail.body_preview,
     mail.body_text,
     mail.body_html,
     codeText,
@@ -1521,7 +1524,12 @@ const paginatedMails = computed(() => {
 
 const groupedMails = computed(() => {
   const mails = paginatedMails.value
-  const today = new Date().toISOString().slice(0, 10)
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date())
   const groups = [
     { label: '今日', items: [] as MailItem[] },
     { label: '更早（7天内）', items: [] as MailItem[] },
@@ -1644,13 +1652,17 @@ const displayedMailBody = computed(() => {
 })
 
 const hasBlockedRemoteImages = computed(() => {
-  return Boolean(selectedMailDetail.value?.body_html?.includes('data-src='))
+  const html = selectedMailDetail.value?.body_html || ''
+  return html.includes('data-easymail-img-src=') || html.includes('data-src=')
 })
 
 const displayedRawHtml = computed(() => {
   const body = selectedMailDetail.value?.body_html || '<p>原始正文为空</p>'
   const hydrated = allowRemoteImages.value
-    ? body.replace(/<span class="mail-image-placeholder" data-src="([^"]*)">.*?<\/span>/g, '<img src="$1" alt="remote image" />')
+    ? body.replace(
+        /<span class="mail-image-placeholder" (?:data-easymail-img-src|data-src)="([^"]*)">远程图片已拦截<\/span>/g,
+        '<img src="$1" alt="remote image" referrerpolicy="no-referrer" />',
+      )
     : body
   return `<!doctype html>
 <html>
@@ -1757,8 +1769,16 @@ onMounted(async () => {
   taxonomyPaneWidth.value = Math.min(240, Math.max(118, storedTaxonomyWidth || 142))
   await refreshState()
   refreshTimer = window.setInterval(() => {
-    refreshState(true)
+    if (!document.hidden) {
+      refreshState(true)
+    }
   }, 4000)
+  handleVisibilityChange = () => {
+    if (!document.hidden) {
+      refreshState(true)
+    }
+  }
+  document.addEventListener('visibilitychange', handleVisibilityChange)
   document.addEventListener('click', closeContextMenu)
   setupAutoPageSizing()
 })
@@ -1769,6 +1789,9 @@ onBeforeUnmount(() => {
   stopGraphReauthPolling()
   if (pageSizingFrame) window.cancelAnimationFrame(pageSizingFrame)
   cancelCloseAccountMetaPopover()
+  if (handleVisibilityChange) {
+    document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }
   document.removeEventListener('click', closeContextMenu)
   accountResizeObserver?.disconnect()
   mailResizeObserver?.disconnect()
@@ -1824,6 +1847,8 @@ function setupAutoPageSizing() {
 }
 
 async function refreshState(silent = false) {
+  if (silent && refreshingState) return
+  refreshingState = true
   try {
     const response = await getDashboardState()
     dashboard.value = response.data
@@ -1842,9 +1867,11 @@ async function refreshState(silent = false) {
     if (selectedMailKey.value) {
       const current = response.data.mails.find((item) => item.local_key === selectedMailKey.value)
       if (current) {
+        const sameSelected = selectedMailDetail.value?.local_key === current.local_key
         selectedMailDetail.value = {
           ...current,
-          body_html: selectedMailDetail.value?.body_html || current.body_html,
+          body_text: (sameSelected && selectedMailDetail.value?.body_text) || current.body_text,
+          body_html: (sameSelected && selectedMailDetail.value?.body_html) || current.body_html,
         }
       }
     }
@@ -1852,6 +1879,8 @@ async function refreshState(silent = false) {
     if (!silent) {
       showError(error?.response?.data?.detail || '加载后台数据失败')
     }
+  } finally {
+    refreshingState = false
   }
 }
 
@@ -2413,6 +2442,7 @@ async function handleOpenMail(mail: MailItem) {
   selectedMailKey.value = mail.local_key
   translatedMailBody.value = ''
   showingTranslatedBody.value = false
+  translatingBody.value = false
   showingRawBody.value = false
   allowRemoteImages.value = false
   try {
@@ -2508,18 +2538,33 @@ async function handleRawBody() {
 async function handleTranslateBody() {
   if (!selectedMailDetail.value?.body_text) return
   if (translatedMailBody.value) {
+    if (showingRawBody.value) {
+      showingRawBody.value = false
+      showingTranslatedBody.value = true
+      return
+    }
     showingTranslatedBody.value = !showingTranslatedBody.value
     return
   }
+  const targetKey = selectedMailDetail.value.local_key
+  const sourceText = selectedMailDetail.value.body_text
   translatingBody.value = true
   try {
-    const response = await translateText(selectedMailDetail.value.body_text)
+    const response = await translateText(sourceText)
+    if (selectedMailKey.value !== targetKey) {
+      return
+    }
     translatedMailBody.value = response.data.translated_text
+    showingRawBody.value = false
     showingTranslatedBody.value = true
   } catch (error: any) {
-    showError(error?.response?.data?.detail || '正文翻译失败')
+    if (selectedMailKey.value === targetKey) {
+      showError(error?.response?.data?.detail || '正文翻译失败')
+    }
   } finally {
-    translatingBody.value = false
+    if (selectedMailKey.value === targetKey) {
+      translatingBody.value = false
+    }
   }
 }
 
