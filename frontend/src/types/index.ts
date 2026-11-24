@@ -113,6 +113,9 @@ export interface AppSettings {
   custom_tags: TagDefinition[]
   auto_receive_enabled: boolean
   auto_receive_interval_minutes: number
+  auto_receive_group_intervals: Record<string, number>
+  auto_receive_pause_failed: boolean
+  auto_receive_incremental: boolean
   token_refresh_enabled: boolean
   token_refresh_interval_minutes: number
   backup_enabled: boolean

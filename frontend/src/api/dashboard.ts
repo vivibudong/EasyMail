@@ -425,6 +425,16 @@ export async function disableApiToken(tokenId: string) {
   return data
 }
 
+export async function enableApiToken(tokenId: string) {
+  const { data } = await apiClient.post<ApiResponse<Record<string, never>>>(`/api-tokens/${tokenId}/enable`)
+  return data
+}
+
+export async function deleteApiToken(tokenId: string) {
+  const { data } = await apiClient.delete<ApiResponse<Record<string, never>>>(`/api-tokens/${tokenId}`)
+  return data
+}
+
 export async function getLogs(options?: {
   category?: string
   level?: string

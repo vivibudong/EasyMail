@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import base64
 import hashlib
 import os
+import queue
 import re
 import secrets
 import subprocess
@@ -21,7 +23,8 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -59,7 +62,20 @@ if config.generated_credentials:
     print(f"ADMIN_EMAIL={config.generated_credentials['admin_email']}", flush=True)
     print(f"ADMIN_PASSWORD={config.generated_credentials['admin_password']}", flush=True)
 
+class SelectiveGZipMiddleware:
+    def __init__(self, app_asgi, minimum_size: int = 1024) -> None:
+        self.app = app_asgi
+        self.gzip_app = GZipMiddleware(app_asgi, minimum_size=minimum_size)
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and scope.get("path") == "/api/events":
+            await self.app(scope, receive, send)
+            return
+        await self.gzip_app(scope, receive, send)
+
+
 app = FastAPI(title=config.app_name, description=config.app_description)
+app.add_middleware(SelectiveGZipMiddleware, minimum_size=1024)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.cors_origins,
@@ -354,7 +370,10 @@ class SettingsRequest(BaseModel):
     custom_groups: list[dict] = Field(default_factory=list)
     custom_tags: list[dict] = Field(default_factory=list)
     auto_receive_enabled: bool = False
-    auto_receive_interval_minutes: int = 15
+    auto_receive_interval_minutes: int = 30
+    auto_receive_group_intervals: dict[str, int] = Field(default_factory=dict)
+    auto_receive_pause_failed: bool = True
+    auto_receive_incremental: bool = True
     token_refresh_enabled: bool = False
     token_refresh_interval_minutes: int = 360
     backup_enabled: bool = False
@@ -972,6 +991,28 @@ def disable_api_token(
     return ok("API Token 已禁用")
 
 
+@app.post("/api/api-tokens/{token_id}/enable")
+def enable_api_token(
+    token_id: str,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    if not storage.set_api_token_enabled(token_id, True):
+        raise HTTPException(status_code=404, detail="API Token 不存在")
+    manager.log_event("info", "api_token", "enable", token_id, "启用 API Token")
+    return ok("API Token 已启用")
+
+
+@app.delete("/api/api-tokens/{token_id}")
+def delete_api_token(
+    token_id: str,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    if not storage.delete_api_token(token_id):
+        raise HTTPException(status_code=404, detail="API Token 不存在")
+    manager.log_event("warn", "api_token", "delete", token_id, "删除 API Token")
+    return ok("API Token 已删除")
+
+
 @app.put("/api/auth/admin-credentials")
 def update_admin_login(
     payload: AdminCredentialsRequest,
@@ -1008,6 +1049,38 @@ def dashboard_state(
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     return ok("ok", manager.dashboard_state())
+
+
+@app.get("/api/events")
+async def dashboard_events(
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    subscriber = manager.subscribe_events()
+
+    async def event_stream():
+        try:
+            yield f"data: {json.dumps({'type': 'connected', 'version': manager.state_version})}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.to_thread(subscriber.get, True, 15.0)
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                except queue.Empty:
+                    yield ": keepalive\n\n"
+        finally:
+            manager.unsubscribe_events(subscriber)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/accounts/import")

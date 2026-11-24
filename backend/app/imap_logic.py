@@ -257,9 +257,9 @@ def get_access_token_by_refresh_token(
         return None, 0, str(exc), "", ""
 
 
-def get_oauth_access_token(account: MailAccount) -> tuple[Optional[str], str]:
+def get_oauth_access_token(account: MailAccount, *, force_refresh: bool = False) -> tuple[Optional[str], str]:
     now = time.time()
-    if account.cached_access_token and now < account.cached_access_expire_at - 60:
+    if not force_refresh and account.cached_access_token and now < account.cached_access_expire_at - 60:
         return account.cached_access_token, "OAuth2刷新令牌(缓存)"
     token = account.token.strip()
     client_id = account.auth_code_or_client_id.strip()
@@ -281,9 +281,9 @@ def get_oauth_access_token(account: MailAccount) -> tuple[Optional[str], str]:
     return None, message
 
 
-def get_graph_access_token(account: MailAccount) -> tuple[Optional[str], str]:
+def get_graph_access_token(account: MailAccount, *, force_refresh: bool = False) -> tuple[Optional[str], str]:
     now = time.time()
-    if account.cached_graph_access_token and now < account.cached_graph_access_expire_at - 60:
+    if not force_refresh and account.cached_graph_access_token and now < account.cached_graph_access_expire_at - 60:
         return account.cached_graph_access_token, "Graph刷新令牌(缓存)"
     token = account.token.strip()
     client_id = account.auth_code_or_client_id.strip()
@@ -453,29 +453,57 @@ def _graph_folder_candidates() -> list[tuple[str, str]]:
     ]
 
 
+def _shanghai_to_utc_iso(value: dt.datetime) -> str:
+    aware = value.replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(dt.timezone.utc)
+    return aware.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def fetch_mails_via_graph(
     account: MailAccount,
     local_read_keys: Optional[set[str]],
     existing_mails: Optional[list[MailItem]],
+    *,
+    incremental: bool = False,
 ) -> tuple[int, list[MailItem], str]:
     access_token, message = get_graph_access_token(account)
     if not access_token:
         return 0, existing_mails or [], message
     existing_by_key: dict[str, MailItem] = {}
+    folder_latest_dt: dict[str, dt.datetime] = {}
     if existing_mails:
         for item in existing_mails:
             if item.source == "graph":
                 existing_by_key[item.local_key] = item
-    merged_unseen_total = 0
+                if item.date_value > dt.datetime(1971, 1, 1):
+                    prev = folder_latest_dt.get(item.folder)
+                    if prev is None or item.date_value > prev:
+                        folder_latest_dt[item.folder] = item.date_value
     successful_folder_requests = 0
     for folder_id, folder_name in _graph_folder_candidates():
+        filter_clause = ""
+        if incremental:
+            latest_dt = folder_latest_dt.get(folder_name)
+            if latest_dt is not None:
+                overlap_dt = latest_dt - dt.timedelta(minutes=15)
+                iso_utc = _shanghai_to_utc_iso(overlap_dt)
+                filter_clause = f"&$filter={quote(f'receivedDateTime ge {iso_utc}', safe='')}"
         path = (
             f"/me/mailFolders/{quote(folder_id)}/messages"
             "?$top=50"
             "&$select=id,subject,from,receivedDateTime,isRead"
             "&$orderby=receivedDateTime desc"
+            f"{filter_clause}"
         )
         payload, error = _graph_request_json(path, access_token)
+        if payload is None and filter_clause:
+            # Fallback to unfiltered query if Graph rejects $filter
+            fallback_path = (
+                f"/me/mailFolders/{quote(folder_id)}/messages"
+                "?$top=50"
+                "&$select=id,subject,from,receivedDateTime,isRead"
+                "&$orderby=receivedDateTime desc"
+            )
+            payload, error = _graph_request_json(fallback_path, access_token)
         if payload is None:
             continue
         successful_folder_requests += 1
@@ -498,8 +526,6 @@ def fetch_mails_via_graph(
                     existing_item.is_unread = False
                 else:
                     existing_item.is_unread = not bool(message_item.get("isRead", False))
-                if existing_item.is_unread:
-                    merged_unseen_total += 1
                 continue
             sender_name = ""
             sender_address = ""
@@ -512,8 +538,6 @@ def fetch_mails_via_graph(
             is_unread = not bool(message_item.get("isRead", False))
             if local_read_keys and local_key in local_read_keys:
                 is_unread = False
-            if is_unread:
-                merged_unseen_total += 1
             new_item = MailItem(
                 account_email=account.email,
                 msg_id=remote_id.encode(),
@@ -532,6 +556,7 @@ def fetch_mails_via_graph(
         return 0, existing_mails or [], "Graph API 未获取到可用邮件，已回退 IMAP"
     merged = list(existing_by_key.values())
     merged.sort(key=lambda item: item.date_value, reverse=True)
+    merged_unseen_total = sum(1 for item in merged if item.is_unread)
     account.auth_method = "Graph API"
     if not merged:
         return 0, [], "Graph收信成功（0封邮件）"
@@ -614,12 +639,15 @@ def fetch_mails_once(
     account: MailAccount,
     local_read_keys: Optional[set[str]],
     existing_mails: Optional[list[MailItem]],
+    *,
+    incremental: bool = False,
 ) -> tuple[int, list[MailItem], str]:
     if _is_outlook_graph_candidate(account):
         graph_unseen, graph_mails, graph_message = fetch_mails_via_graph(
             account,
             local_read_keys,
             existing_mails,
+            incremental=incremental,
         )
         if "成功" in graph_message:
             return graph_unseen, graph_mails, graph_message
@@ -658,11 +686,17 @@ def fetch_mails_once(
             ]
 
         existing_by_key: dict[str, MailItem] = {}
+        folder_max_uid: dict[str, int] = {}
         if existing_mails:
             for item in existing_mails:
                 existing_by_key[item.local_key] = item
+                if item.source == "imap_uid":
+                    uid_text = item.msg_id.decode(errors="ignore").strip()
+                    if uid_text.isdigit():
+                        uid_val = int(uid_text)
+                        if uid_val > folder_max_uid.get(item.folder, 0):
+                            folder_max_uid[item.folder] = uid_val
 
-        unseen_total = 0
         for folder in folders:
             try:
                 typ, _ = client.select(f'"{folder}"', readonly=True)
@@ -679,7 +713,19 @@ def fetch_mails_once(
             )
             unseen_uid_set = set(unseen_uids)
 
-            all_typ, all_data = client.uid("search", None, "ALL")
+            # Sync unread flags on already cached UID mails in this folder
+            for item in existing_by_key.values():
+                if item.source == "imap_uid" and item.folder == folder:
+                    if local_read_keys and item.local_key in local_read_keys:
+                        item.is_unread = False
+                    else:
+                        item.is_unread = item.msg_id in unseen_uid_set
+
+            max_cached_uid = folder_max_uid.get(folder, 0)
+            if incremental and max_cached_uid > 0:
+                all_typ, all_data = client.uid("search", None, f"UID {max_cached_uid + 1}:*")
+            else:
+                all_typ, all_data = client.uid("search", None, "ALL")
             if all_typ != "OK":
                 continue
             all_uids = all_data[0].split() if all_data and all_data[0] else []
@@ -691,10 +737,7 @@ def fetch_mails_once(
                 if local_read_keys and local_key in local_read_keys:
                     is_unread = False
                 if local_key in existing_by_key:
-                    existing_item = existing_by_key[local_key]
-                    existing_item.is_unread = is_unread
-                    if existing_item.is_unread:
-                        unseen_total += 1
+                    existing_by_key[local_key].is_unread = is_unread
                     continue
                 fetch_typ, fetch_data = client.uid(
                     "fetch", msg_uid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])"
@@ -710,8 +753,6 @@ def fetch_mails_once(
                 msg = email.message_from_bytes(header_block)
                 raw_from = msg.get("From")
                 display_name, sender_address = email.utils.parseaddr(raw_from or "")
-                if is_unread:
-                    unseen_total += 1
                 new_item = MailItem(
                     account_email=account.email,
                     msg_id=msg_uid,
@@ -730,6 +771,7 @@ def fetch_mails_once(
 
         merged = list(existing_by_key.values())
         merged.sort(key=lambda item: item.date_value, reverse=True)
+        unseen_total = sum(1 for item in merged if item.is_unread)
         return unseen_total, merged, "收信成功"
     except Exception as exc:
         return (

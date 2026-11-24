@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -35,6 +36,7 @@ from .models import (
     TagDefinition,
     account_from_dict,
     account_to_dict,
+    normalize_group_receive_intervals,
     normalize_import_delimiters,
     normalize_telegram_mail_groups,
     settings_from_dict,
@@ -64,9 +66,15 @@ class MailManager:
         self.body_tasks: dict[str, BodyTask] = {}
 
         self.login_q: queue.Queue[tuple[int, int, MailAccount]] = queue.PriorityQueue()
-        self.receive_q: queue.Queue[tuple[int, int, MailAccount]] = queue.PriorityQueue()
+        self.receive_q: queue.Queue[tuple[int, int, MailAccount, bool]] = queue.PriorityQueue()
         self.body_q: queue.Queue[tuple[MailAccount, MailItem]] = queue.Queue()
         self.queue_sequence = 0
+
+        self._event_lock = threading.Lock()
+        self._event_subscribers: set[queue.Queue[dict]] = set()
+        self.state_version = 1
+
+        self.notified_keys: set[str] = self.storage.load_notified_keys()
 
         self.queued_login: set[str] = set()
         self.queued_receive: set[str] = set()
@@ -90,6 +98,16 @@ class MailManager:
         self.last_telegram_notification_cutoff_at = float(task_state.get("last_telegram_notification_cutoff_at", time.time()) or time.time())
         self.pending_mail_batch_started_at = float(task_state.get("pending_mail_batch_started_at", 0.0) or 0.0)
         self.last_mail_event_at = float(task_state.get("last_mail_event_at", 0.0) or 0.0)
+        raw_group_runs = task_state.get("last_group_auto_receive_at", {})
+        self.last_group_auto_receive_at: dict[str, float] = (
+            {
+                str(k): float(v or 0.0)
+                for k, v in raw_group_runs.items()
+                if str(k).strip()
+            }
+            if isinstance(raw_group_runs, dict)
+            else {}
+        )
 
         self.settings.custom_groups = self._sort_groups(self.settings.custom_groups)
         self.settings.custom_tags = self._sort_tags(self.settings.custom_tags)
@@ -141,18 +159,32 @@ class MailManager:
                 {"count": extracted_code_cache},
             )
         self.rebuild_mail_pool()
+        if not self.notified_keys and self.all_mails:
+            seed_keys: set[str] = set()
+            for item in self.all_mails:
+                seed_keys.update(self._mail_notification_keys(item))
+            self.notified_keys.update(seed_keys)
+            self.storage.add_notified_keys(seed_keys)
         self._start_workers()
         if self.accounts and self.settings.startup_auto_login:
-            startup_accounts = [item for item in self.accounts.copy() if not self._group_is_locked(item.group_name)]
-            skipped_locked = len(self.accounts) - len(startup_accounts)
-            if skipped_locked:
+            startup_accounts = [
+                item
+                for item in self.accounts.copy()
+                if not self._group_is_locked(item.group_name) and item.status != "登录成功"
+            ]
+            skipped_locked = sum(1 for item in self.accounts if self._group_is_locked(item.group_name))
+            kept_logged_in = sum(
+                1 for item in self.accounts
+                if not self._group_is_locked(item.group_name) and item.status == "登录成功"
+            )
+            if skipped_locked or kept_logged_in:
                 self.log_event(
                     "info",
                     "login",
                     "startup_skip_locked",
                     "startup",
-                    "启动自动登录跳过锁定分组邮箱",
-                    {"skipped": skipped_locked},
+                    "启动自动登录保留已登录状态并跳过锁定分组",
+                    {"skipped_locked": skipped_locked, "kept_logged_in": kept_logged_in, "queued": len(startup_accounts)},
                 )
             if startup_accounts:
                 self.start_relogin_batch(startup_accounts)
@@ -162,6 +194,35 @@ class MailManager:
         threading.Thread(target=self.receive_worker, daemon=True).start()
         threading.Thread(target=self.body_worker, daemon=True).start()
         threading.Thread(target=self.scheduler_worker, daemon=True).start()
+
+    def subscribe_events(self) -> queue.Queue[dict]:
+        subscriber: queue.Queue[dict] = queue.Queue(maxsize=64)
+        with self._event_lock:
+            self._event_subscribers.add(subscriber)
+        return subscriber
+
+    def unsubscribe_events(self, subscriber: queue.Queue[dict]) -> None:
+        with self._event_lock:
+            self._event_subscribers.discard(subscriber)
+
+    def _emit_event(self, event_type: str, data: Optional[dict] = None) -> None:
+        with self._event_lock:
+            self.state_version += 1
+            payload = {
+                "type": event_type,
+                "version": self.state_version,
+                "data": data or {},
+            }
+            subscribers = list(self._event_subscribers)
+        for subscriber in subscribers:
+            try:
+                subscriber.put_nowait(payload)
+            except queue.Full:
+                try:
+                    subscriber.get_nowait()
+                    subscriber.put_nowait(payload)
+                except Exception:
+                    pass
 
     def _persist_scheduler_state(self) -> None:
         self.storage.save_task_state(
@@ -174,6 +235,7 @@ class MailManager:
                 "last_telegram_notification_cutoff_at": self.last_telegram_notification_cutoff_at,
                 "pending_mail_batch_started_at": self.pending_mail_batch_started_at,
                 "last_mail_event_at": self.last_mail_event_at,
+                "last_group_auto_receive_at": self.last_group_auto_receive_at,
             },
         )
 
@@ -273,34 +335,88 @@ class MailManager:
         match = re.search(r"[\w.!#$%&'*+/=?^_`{|}~-]+@[\w.-]+\.[A-Za-z]{2,}", text)
         return match.group(0) if match else "-"
 
-    def _notify_new_mail_instant(self, account: MailAccount, item: MailItem) -> None:
+    def _is_deleted_folder(self, folder_name: str) -> bool:
+        return self._folder_display_name(folder_name) == "已删除"
+
+    def _mail_notification_keys(self, item: MailItem) -> tuple[str, str]:
+        sender = self._extract_sender_email(item.from_text).strip().lower()
+        date_minute = item.date_value.strftime("%Y-%m-%d %H:%M")
+        raw = f"{item.account_email.strip().lower()}|{item.subject.strip()}|{sender}|{date_minute}"
+        fp_key = "fp:" + hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:32]
+        return item.local_key, fp_key
+
+    def _notify_new_mail_instant(self, group_name: str, account_email: str, subject: str, sender_email: str) -> None:
         text = (
             "EasyMail 通知\n"
             "====================\n"
             "📬 收到一封新邮件\n"
-            f"📁 分组：{account.group_name or '未分组'}\n"
-            f"📮 邮箱：{account.email}\n"
-            f"📝 主题：{item.subject}\n"
-            f"📨 发件人：{self._extract_sender_email(item.from_text)}"
+            f"📁 分组：{group_name or '未分组'}\n"
+            f"📮 邮箱：{account_email}\n"
+            f"📝 主题：{subject}\n"
+            f"📨 发件人：{sender_email}"
         )
         self._send_telegram_message(text)
 
-    def _queue_mail_notifications(self, account: MailAccount, items: list[MailItem]) -> None:
-        if not self._telegram_ready():
+    def _dispatch_instant_notifications_async(self, payloads: list[dict[str, str]]) -> None:
+        if not payloads:
             return
-        if self.settings.telegram_mail_mode == "off" or not self._should_notify_account(account):
-            return
-        cutoff_dt = self._shanghai_from_timestamp(self.last_telegram_notification_cutoff_at)
-        eligible_items = [item for item in items if item.date_value > cutoff_dt]
-        if not eligible_items:
-            return
-        if self.settings.telegram_mail_mode == "instant":
-            for item in eligible_items:
+
+        def runner() -> None:
+            for item in payloads:
                 try:
-                    self._notify_new_mail_instant(account, item)
+                    self._notify_new_mail_instant(
+                        item["group_name"],
+                        item["email"],
+                        item["subject"],
+                        item["sender_email"],
+                    )
                 except Exception as exc:
-                    self.log_event("error", "notification", "telegram_instant_failed", account.email, "新邮件 Telegram 通知失败", {"error": str(exc)})
-            return
+                    self.log_event(
+                        "error",
+                        "notification",
+                        "telegram_instant_failed",
+                        item["email"],
+                        "新邮件 Telegram 通知失败",
+                        {"error": str(exc)},
+                    )
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _queue_mail_notifications(self, account: MailAccount, items: list[MailItem]) -> list[dict[str, str]]:
+        if not self._telegram_ready():
+            return []
+        if self.settings.telegram_mail_mode == "off" or not self._should_notify_account(account):
+            return []
+        cutoff_dt = self._shanghai_from_timestamp(self.last_telegram_notification_cutoff_at)
+        eligible_items: list[MailItem] = []
+        new_dedup_keys: set[str] = set()
+        for item in items:
+            if self._is_deleted_folder(item.folder):
+                continue
+            if item.date_value <= cutoff_dt:
+                continue
+            local_key, fp_key = self._mail_notification_keys(item)
+            if local_key in self.notified_keys or fp_key in self.notified_keys:
+                continue
+            if local_key in new_dedup_keys or fp_key in new_dedup_keys:
+                continue
+            new_dedup_keys.add(local_key)
+            new_dedup_keys.add(fp_key)
+            eligible_items.append(item)
+        if not eligible_items:
+            return []
+        self.notified_keys.update(new_dedup_keys)
+        self.storage.add_notified_keys(new_dedup_keys)
+        if self.settings.telegram_mail_mode == "instant":
+            return [
+                {
+                    "group_name": account.group_name or "未分组",
+                    "email": account.email,
+                    "subject": item.subject,
+                    "sender_email": self._extract_sender_email(item.from_text),
+                }
+                for item in eligible_items
+            ]
         now_text = format_shanghai_time(self._now_shanghai())
         now = time.time()
         if not self.pending_mail_batch_started_at:
@@ -321,6 +437,7 @@ class MailManager:
                 }
             )
         self._persist_scheduler_state()
+        return []
 
     def flush_mail_summary_notifications(self, force: bool = False) -> None:
         with self.lock:
@@ -561,12 +678,12 @@ class MailManager:
         self.login_total += 1
         self.login_q.put((priority, self._next_queue_sequence(), account))
 
-    def enqueue_receive(self, account: MailAccount, priority: int = 50) -> None:
+    def enqueue_receive(self, account: MailAccount, priority: int = 50, incremental: bool = False) -> None:
         if account.email in self.queued_receive:
             return
         self.queued_receive.add(account.email)
         self.receive_total += 1
-        self.receive_q.put((priority, self._next_queue_sequence(), account))
+        self.receive_q.put((priority, self._next_queue_sequence(), account, incremental))
 
     def enqueue_body(self, account: MailAccount, item: MailItem) -> BodyTask:
         if item.local_key in self.queued_body:
@@ -743,15 +860,19 @@ class MailManager:
         *,
         priority: int = 50,
         interrupt_pending: bool = False,
+        incremental: bool = False,
+        reset_progress: bool = True,
     ) -> int:
         with self.lock:
             items = [item for item in targets if item]
             if interrupt_pending:
                 self._clear_receive_queue()
-            self.reset_receive_progress()
+            if reset_progress:
+                self.reset_receive_progress()
+            queued_before = len(self.queued_receive)
             for account in items:
-                self.enqueue_receive(account, priority=priority)
-            return len(items)
+                self.enqueue_receive(account, priority=priority, incremental=incremental)
+            return max(len(items), len(self.queued_receive) - queued_before) if not reset_progress else len(items)
 
     def start_relogin_batch(
         self,
@@ -859,6 +980,12 @@ class MailManager:
             target.color = color.strip() or "#D6EAF8"
             target.priority = max(1, min(999, int(priority or 100)))
             target.locked = bool(locked)
+            if original_name != normalized:
+                if original_name in self.settings.auto_receive_group_intervals:
+                    self.settings.auto_receive_group_intervals[normalized] = self.settings.auto_receive_group_intervals.pop(original_name)
+                if original_name in self.last_group_auto_receive_at:
+                    self.last_group_auto_receive_at[normalized] = self.last_group_auto_receive_at.pop(original_name)
+                    self._persist_scheduler_state()
             self.settings.custom_groups = self._sort_groups(self.settings.custom_groups)
             self._save_accounts_state()
             self.storage.save_settings(self.settings)
@@ -878,6 +1005,10 @@ class MailManager:
             for account in self.accounts:
                 if account.group_name == group_name:
                     account.group_name = "未分组"
+            self.settings.auto_receive_group_intervals.pop(group_name, None)
+            if group_name in self.last_group_auto_receive_at:
+                self.last_group_auto_receive_at.pop(group_name, None)
+                self._persist_scheduler_state()
             self.settings.custom_groups = self._sort_groups(self.settings.custom_groups)
             self._save_accounts_state()
             self.storage.save_settings(self.settings)
@@ -1307,12 +1438,21 @@ class MailManager:
             self.settings.auto_receive_enabled = bool(
                 payload.get("auto_receive_enabled", self.settings.auto_receive_enabled)
             )
-            self.settings.auto_receive_interval_minutes = int(
-                payload.get(
-                    "auto_receive_interval_minutes",
-                    self.settings.auto_receive_interval_minutes,
+            raw_default_interval = payload.get(
+                "auto_receive_interval_minutes",
+                self.settings.auto_receive_interval_minutes,
+            )
+            default_interval = int(raw_default_interval if raw_default_interval is not None else 30)
+            self.settings.auto_receive_interval_minutes = 0 if default_interval <= 0 else max(30, min(10080, default_interval))
+            if "auto_receive_group_intervals" in payload:
+                self.settings.auto_receive_group_intervals = normalize_group_receive_intervals(
+                    payload.get("auto_receive_group_intervals")
                 )
-                or 15
+            self.settings.auto_receive_pause_failed = bool(
+                payload.get("auto_receive_pause_failed", self.settings.auto_receive_pause_failed)
+            )
+            self.settings.auto_receive_incremental = bool(
+                payload.get("auto_receive_incremental", self.settings.auto_receive_incremental)
             )
             self.settings.token_refresh_enabled = bool(
                 payload.get("token_refresh_enabled", self.settings.token_refresh_enabled)
@@ -1535,8 +1675,18 @@ class MailManager:
             success_count = 0
             failed_count = 0
             for account in accounts:
-                imap_token, imap_message = get_oauth_access_token(account)
-                graph_token, graph_message = get_graph_access_token(account)
+                imap_token = None
+                imap_message = "跳过"
+                graph_token = None
+                graph_message = "跳过"
+                if account.auth_method == "Graph API":
+                    graph_token, graph_message = get_graph_access_token(account, force_refresh=True)
+                    if not graph_token:
+                        imap_token, imap_message = get_oauth_access_token(account, force_refresh=True)
+                else:
+                    imap_token, imap_message = get_oauth_access_token(account, force_refresh=True)
+                    if not imap_token:
+                        graph_token, graph_message = get_graph_access_token(account, force_refresh=True)
                 ok = bool(imap_token or graph_token)
                 if ok:
                     success_count += 1
@@ -1804,6 +1954,13 @@ class MailManager:
             "custom_tags": len(restored_settings.custom_tags),
         }
 
+    def _effective_group_receive_interval(self, group_name: str, settings: AppSettings) -> int:
+        if group_name in settings.auto_receive_group_intervals:
+            val = int(settings.auto_receive_group_intervals[group_name])
+            return 0 if val <= 0 else max(30, val)
+        val = int(settings.auto_receive_interval_minutes)
+        return 0 if val <= 0 else max(30, val)
+
     def scheduler_worker(self) -> None:
         while not self.scheduler_stop.is_set():
             try:
@@ -1817,15 +1974,65 @@ class MailManager:
                     and now - self.last_token_refresh_run_at >= settings.token_refresh_interval_minutes * 60
                 ):
                     self.refresh_all_tokens(trigger_source="scheduled")
-                if (
-                    settings.auto_receive_enabled
-                    and settings.auto_receive_interval_minutes > 0
-                    and now - self.last_auto_receive_run_at >= settings.auto_receive_interval_minutes * 60
-                ):
-                    self.start_receive_batch(accounts, priority=80)
-                    self.last_auto_receive_run_at = now
-                    self._persist_scheduler_state()
-                    self.log_event("info", "scheduler", "auto_receive", "scheduled", "触发定时收件", {"accounts": len(accounts)})
+                if settings.auto_receive_enabled:
+                    group_names = ["未分组", *[item.name for item in settings.custom_groups]]
+                    accounts_by_group: dict[str, list[MailAccount]] = {}
+                    for acc in accounts:
+                        g_name = acc.group_name or "未分组"
+                        accounts_by_group.setdefault(g_name, []).append(acc)
+                        if g_name not in group_names:
+                            group_names.append(g_name)
+                    scheduled_any = False
+                    total_queued = 0
+                    total_skipped_failed = 0
+                    triggered_groups: list[str] = []
+                    for group_name in group_names:
+                        group_accounts = accounts_by_group.get(group_name, [])
+                        if not group_accounts:
+                            continue
+                        interval_minutes = self._effective_group_receive_interval(group_name, settings)
+                        if interval_minutes <= 0:
+                            continue
+                        last_run = float(self.last_group_auto_receive_at.get(group_name, 0.0) or 0.0)
+                        if now - last_run < interval_minutes * 60:
+                            continue
+                        if settings.auto_receive_pause_failed:
+                            eligible = [
+                                item for item in group_accounts
+                                if item.status not in {"登录失败", "收信失败"}
+                            ]
+                            total_skipped_failed += len(group_accounts) - len(eligible)
+                        else:
+                            eligible = group_accounts
+                        self.last_group_auto_receive_at[group_name] = now
+                        scheduled_any = True
+                        if eligible:
+                            self.start_receive_batch(
+                                eligible,
+                                priority=80,
+                                interrupt_pending=False,
+                                incremental=settings.auto_receive_incremental,
+                                reset_progress=False,
+                            )
+                            total_queued += len(eligible)
+                            triggered_groups.append(group_name)
+                    if scheduled_any:
+                        self.last_auto_receive_run_at = now
+                        self._persist_scheduler_state()
+                    if total_queued > 0 or total_skipped_failed > 0:
+                        self.log_event(
+                            "info",
+                            "scheduler",
+                            "auto_receive",
+                            "scheduled",
+                            "触发分组定时收件",
+                            {
+                                "groups": triggered_groups,
+                                "queued": total_queued,
+                                "skipped_failed": total_skipped_failed,
+                                "incremental": settings.auto_receive_incremental,
+                            },
+                        )
                 if (
                     settings.backup_enabled
                     and settings.backup_interval_minutes > 0
@@ -1850,7 +2057,7 @@ class MailManager:
                         account.status = "登录成功"
                         account.auth_method = method or "-"
                         account.last_error = ""
-                        self.enqueue_receive(account, priority=20)
+                        self.enqueue_receive(account, priority=20, incremental=False)
                         self.log_event("info", "auth", "login_success", account.email, "邮箱登录成功", {"method": method or "-"})
                     else:
                         account.status = "登录失败"
@@ -1869,10 +2076,13 @@ class MailManager:
                     self.login_done += 1
                     self.login_busy_email = ""
                     self.queued_login.discard(account.email)
+                self._emit_event("account_updated", {"email": account.email})
 
     def receive_worker(self) -> None:
         while True:
-            _, _, account = self.receive_q.get()
+            _, _, account, incremental = self.receive_q.get()
+            instant_notifications: list[dict[str, str]] = []
+            new_count = 0
             try:
                 with self.lock:
                     self.receive_busy_email = account.email
@@ -1880,12 +2090,18 @@ class MailManager:
                     existing_mails = list(account.mails)
                     local_read_keys = set(self.local_read_keys)
                     existing_keys = {item.local_key for item in existing_mails}
-                unseen, mails, message = fetch_mails_once(account, local_read_keys, existing_mails)
+                unseen, mails, message = fetch_mails_once(
+                    account,
+                    local_read_keys,
+                    existing_mails,
+                    incremental=incremental,
+                )
                 with self.lock:
                     account.unseen_count = unseen
                     account.mails = mails
                     account.last_check = format_shanghai_time(self._now_shanghai())
                     new_items = [item for item in mails if item.local_key not in existing_keys]
+                    new_count = len(new_items)
                     codes_changed = any(self.refresh_verification_codes(item) for item in mails)
                     auto_body_queued = 0
                     if "成功" in message:
@@ -1895,7 +2111,9 @@ class MailManager:
                                 auto_body_queued += 1
                         account.status = "登录成功"
                         account.last_error = ""
-                        self._queue_mail_notifications(account, new_items)
+                        # Rebuild mail pool FIRST so Web UI sees new mail before TG fires
+                        self.rebuild_mail_pool()
+                        instant_notifications = self._queue_mail_notifications(account, new_items)
                         if new_items:
                             self.log_event(
                                 "info",
@@ -1903,11 +2121,12 @@ class MailManager:
                                 "receive_success",
                                 account.email,
                                 f"收到 {len(new_items)} 封新邮件",
-                                {"new_count": len(new_items), "unseen": unseen, "method": account.auth_method},
+                                {"new_count": len(new_items), "unseen": unseen, "method": account.auth_method, "incremental": incremental},
                             )
                     else:
                         account.status = "收信失败"
                         account.last_error = message
+                        self.rebuild_mail_pool()
                         self.log_event("error", "mail_fetch", "receive_failed", account.email, "收件失败", {"error": message})
                     self.storage.save_mail_cache(account)
                     if codes_changed:
@@ -1915,7 +2134,6 @@ class MailManager:
                     if auto_body_queued:
                         self.log_event("info", "mail_body", "auto_body_queue", account.email, "新邮件正文已自动排队", {"queued": auto_body_queued})
                     self._save_accounts_state()
-                    self.rebuild_mail_pool()
             except Exception as exc:
                 with self.lock:
                     account.status = "收信失败"
@@ -1927,6 +2145,10 @@ class MailManager:
                     self.receive_done += 1
                     self.receive_busy_email = ""
                     self.queued_receive.discard(account.email)
+                # Push real-time SSE event to web clients BEFORE sending TG notifications
+                self._emit_event("mail_received", {"email": account.email, "new_count": new_count})
+                if instant_notifications:
+                    self._dispatch_instant_notifications_async(instant_notifications)
 
     def body_worker(self) -> None:
         while True:
@@ -1983,3 +2205,4 @@ class MailManager:
             finally:
                 with self.lock:
                     self.queued_body.discard(item.local_key)
+                self._emit_event("body_loaded", {"local_key": item.local_key})

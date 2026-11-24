@@ -295,26 +295,160 @@
           </div>
         </section>
 
+        <section v-else-if="currentSection === 'auto_receive'" class="card">
+          <div class="card-header">
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">自动收件</h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
+              按分组独立配置自动收件频率。设为 0 表示永不自动收件（仅手动触发），建议非 0 间隔从 30 分钟起步以降低风控风险。
+            </p>
+          </div>
+
+          <div class="card-body space-y-5">
+            <div class="grid gap-4 md:grid-cols-2">
+              <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-dark-300 md:col-span-2">
+                <input v-model="form.auto_receive_enabled" type="checkbox" />
+                启用定时自动收件
+              </label>
+
+              <label class="space-y-2">
+                <span class="input-label mb-0">默认收件间隔（分钟，0 表示永不，非 0 最低 30）</span>
+                <input
+                  v-model.number="form.auto_receive_interval_minutes"
+                  class="input"
+                  type="number"
+                  min="0"
+                  step="5"
+                  @blur="normalizeDefaultReceiveInterval"
+                />
+              </label>
+
+              <div class="flex flex-col justify-center gap-2 text-sm text-gray-700 dark:text-dark-300">
+                <label class="inline-flex items-center gap-2">
+                  <input v-model="form.auto_receive_pause_failed" type="checkbox" />
+                  认证/收信失败的账号暂停自动收件（恢复正常后自动继续）
+                </label>
+                <label class="inline-flex items-center gap-2">
+                  <input v-model="form.auto_receive_incremental" type="checkbox" />
+                  启用安全增量拉取（15 分钟重叠窗口 + IMAP UID 增量，不漏件）
+                </label>
+              </div>
+            </div>
+
+            <div class="space-y-2">
+              <div class="flex items-center justify-between gap-2">
+                <span class="input-label mb-0">按分组独立设置收件间隔</span>
+                <span class="text-xs text-gray-500 dark:text-dark-400">
+                  留空则跟随默认间隔（{{ form.auto_receive_interval_minutes <= 0 ? '永不自动收件' : `每 ${form.auto_receive_interval_minutes} 分钟` }}）
+                </span>
+              </div>
+              <div class="overflow-x-auto rounded-2xl border border-gray-100 dark:border-dark-700">
+                <table class="min-w-full text-left text-sm">
+                  <thead class="bg-gray-50 text-xs text-gray-500 dark:bg-dark-800 dark:text-dark-400">
+                    <tr>
+                      <th class="px-4 py-3">分组</th>
+                      <th class="px-4 py-3">当前生效策略</th>
+                      <th class="px-4 py-3">独立间隔（分钟）</th>
+                      <th class="px-4 py-3">快捷设定</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-gray-100 dark:divide-dark-700">
+                    <tr v-for="group in autoReceiveGroupRows" :key="group.name">
+                      <td class="px-4 py-3 font-medium text-gray-900 dark:text-white">
+                        <span class="inline-flex items-center gap-2">
+                          <span
+                            class="inline-block h-2.5 w-2.5 rounded-full"
+                            :style="{ backgroundColor: group.color }"
+                          ></span>
+                          <span>{{ group.name }}</span>
+                          <span
+                            v-if="group.locked"
+                            class="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/20 dark:text-amber-300"
+                          >
+                            已上锁
+                          </span>
+                        </span>
+                      </td>
+                      <td class="px-4 py-3 text-xs text-gray-600 dark:text-dark-300">
+                        {{ describeGroupReceivePolicy(group.name) }}
+                      </td>
+                      <td class="px-4 py-3">
+                        <input
+                          class="input w-28 py-1.5 text-xs"
+                          type="number"
+                          min="0"
+                          step="5"
+                          placeholder="跟随默认"
+                          :value="getGroupReceiveIntervalInput(group.name)"
+                          @input="onGroupReceiveIntervalInput(group.name, ($event.target as HTMLInputElement).value)"
+                          @blur="normalizeGroupReceiveInterval(group.name)"
+                        />
+                      </td>
+                      <td class="px-4 py-3">
+                        <div class="flex flex-wrap gap-1.5">
+                          <button
+                            type="button"
+                            class="btn btn-secondary btn-sm px-2 py-1 text-[11px]"
+                            @click="setGroupReceiveInterval(group.name, 0)"
+                          >
+                            永不(0)
+                          </button>
+                          <button
+                            type="button"
+                            class="btn btn-secondary btn-sm px-2 py-1 text-[11px]"
+                            @click="setGroupReceiveInterval(group.name, 30)"
+                          >
+                            30分
+                          </button>
+                          <button
+                            type="button"
+                            class="btn btn-secondary btn-sm px-2 py-1 text-[11px]"
+                            @click="setGroupReceiveInterval(group.name, 60)"
+                          >
+                            60分
+                          </button>
+                          <button
+                            type="button"
+                            class="btn btn-secondary btn-sm px-2 py-1 text-[11px]"
+                            @click="setGroupReceiveInterval(group.name, 180)"
+                          >
+                            3小时
+                          </button>
+                          <button
+                            type="button"
+                            class="btn btn-secondary btn-sm px-2 py-1 text-[11px]"
+                            @click="setGroupReceiveInterval(group.name, 360)"
+                          >
+                            6小时
+                          </button>
+                          <button
+                            type="button"
+                            class="btn btn-secondary btn-sm px-2 py-1 text-[11px]"
+                            @click="clearGroupReceiveInterval(group.name)"
+                          >
+                            默认
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section v-else-if="currentSection === 'refresh'" class="card">
           <div class="card-header">
             <h2 class="text-lg font-semibold text-gray-900 dark:text-white">邮箱刷新</h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
-              管理自动登录、定时收件和 Token 刷新任务。
+              管理启动登录行为与定时 Token 续期刷新任务（自动收件请前往左侧「自动收件」页面按分组配置）。
             </p>
           </div>
 
           <div class="card-body grid gap-5 md:grid-cols-2">
             <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-dark-300 md:col-span-2">
               <input v-model="form.startup_auto_login" type="checkbox" />
-              后端启动后自动登录已保存账号
-            </label>
-            <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-dark-300">
-              <input v-model="form.auto_receive_enabled" type="checkbox" />
-              启用定时收件
-            </label>
-            <label class="space-y-2">
-              <span class="input-label mb-0">收件间隔（分钟）</span>
-              <input v-model.number="form.auto_receive_interval_minutes" class="input" type="number" min="5" />
+              后端启动后仅对未登录或失败的账号自动登录（已登录账号自动保留登录态）
             </label>
             <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-dark-300">
               <input v-model="form.token_refresh_enabled" type="checkbox" />
@@ -460,11 +594,21 @@
         </section>
 
         <section v-else-if="currentSection === 'api'" class="card">
-          <div class="card-header">
-            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">API Token</h2>
-            <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
-              为外部系统创建 API Key。完整密钥只会在创建后显示一次，请立即复制保存。
-            </p>
+          <div class="card-header flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">API Token</h2>
+              <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
+                为外部系统创建 API Key。完整密钥只会在创建后显示一次，请立即复制保存。
+              </p>
+            </div>
+            <a
+              href="https://github.com/vivibudong/EasyMail/blob/main/API_doc.md"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="btn btn-secondary btn-sm shrink-0"
+            >
+              查看 API 文档 ↗
+            </a>
           </div>
 
           <div class="card-body space-y-5">
@@ -544,13 +688,29 @@
                       <span v-if="item.last_used_ip"> / {{ item.last_used_ip }}</span>
                     </td>
                     <td class="px-4 py-3">
-                      <button
-                        class="btn btn-danger btn-sm"
-                        :disabled="!item.enabled || disablingApiTokenId === item.id"
-                        @click="handleDisableApiToken(item.id)"
-                      >
-                        {{ disablingApiTokenId === item.id ? '禁用中...' : '禁用' }}
-                      </button>
+                      <div class="flex items-center gap-2">
+                        <button
+                          class="btn btn-sm"
+                          :class="item.enabled ? 'btn-secondary' : 'btn-primary'"
+                          :disabled="togglingApiTokenId === item.id || deletingApiTokenId === item.id"
+                          @click="handleToggleApiToken(item)"
+                        >
+                          {{
+                            togglingApiTokenId === item.id
+                              ? '处理中...'
+                              : item.enabled
+                                ? '禁用'
+                                : '启用'
+                          }}
+                        </button>
+                        <button
+                          class="btn btn-danger btn-sm"
+                          :disabled="deletingApiTokenId === item.id || togglingApiTokenId === item.id"
+                          @click="handleDeleteApiToken(item)"
+                        >
+                          {{ deletingApiTokenId === item.id ? '删除中...' : '删除' }}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                   <tr v-if="!apiTokens.length">
@@ -585,7 +745,9 @@ import { useRoute, useRouter } from 'vue-router'
 import { updateAdminCredentials } from '@/api/auth'
 import {
   createApiToken,
+  deleteApiToken,
   disableApiToken,
+  enableApiToken,
   getApiTokens,
   getSettings,
   getTokenRefreshHistory,
@@ -611,6 +773,7 @@ const sections = [
   { key: 'translate', label: '翻译配置' },
   { key: 'oauth', label: '微软授权' },
   { key: 'notifications', label: '通知' },
+  { key: 'auto_receive', label: '自动收件' },
   { key: 'refresh', label: '邮箱刷新' },
   { key: 'backup', label: '备份' },
   { key: 'security', label: '安全' },
@@ -722,7 +885,10 @@ const form = reactive<AppSettings>({
   custom_groups: [],
   custom_tags: [],
   auto_receive_enabled: false,
-  auto_receive_interval_minutes: 15,
+  auto_receive_interval_minutes: 30,
+  auto_receive_group_intervals: {},
+  auto_receive_pause_failed: true,
+  auto_receive_incremental: true,
   token_refresh_enabled: false,
   token_refresh_interval_minutes: 360,
   backup_enabled: false,
@@ -770,7 +936,8 @@ const apiTokens = ref<ApiTokenItem[]>([])
 const availableApiScopes = ref<string[]>([])
 const createdApiToken = ref('')
 const creatingApiToken = ref(false)
-const disablingApiTokenId = ref('')
+const togglingApiTokenId = ref('')
+const deletingApiTokenId = ref('')
 const apiTokenForm = reactive({
   name: '',
   scopes: ['read:accounts', 'read:mails'],
@@ -794,6 +961,14 @@ const currentSection = computed(() => {
 })
 
 const groupOptions = computed(() => ['未分组', ...form.custom_groups.map((item) => item.name).filter((name) => name)])
+const autoReceiveGroupRows = computed(() => [
+  { name: '未分组', color: '#D6EAF8', locked: false },
+  ...form.custom_groups.map((item) => ({
+    name: item.name,
+    color: item.color || '#D6EAF8',
+    locked: Boolean(item.locked),
+  })),
+])
 const notificationGroupOptions = computed(() => [
   { value: '__all__', label: '全部邮箱' },
   ...groupOptions.value.map((group) => ({ value: group, label: group })),
@@ -965,16 +1140,103 @@ async function handleCreateApiToken() {
   }
 }
 
-async function handleDisableApiToken(tokenId: string) {
-  disablingApiTokenId.value = tokenId
+function normalizeDefaultReceiveInterval() {
+  const val = Number(form.auto_receive_interval_minutes)
+  if (!Number.isFinite(val) || val <= 0) {
+    form.auto_receive_interval_minutes = 0
+  } else if (val < 30) {
+    form.auto_receive_interval_minutes = 30
+  } else {
+    form.auto_receive_interval_minutes = Math.round(val)
+  }
+}
+
+function getGroupReceiveIntervalInput(groupName: string) {
+  const map = form.auto_receive_group_intervals || {}
+  if (Object.prototype.hasOwnProperty.call(map, groupName)) {
+    return String(map[groupName])
+  }
+  return ''
+}
+
+function onGroupReceiveIntervalInput(groupName: string, raw: string) {
+  const trimmed = raw.trim()
+  if (!form.auto_receive_group_intervals) {
+    form.auto_receive_group_intervals = {}
+  }
+  if (trimmed === '') {
+    delete form.auto_receive_group_intervals[groupName]
+    return
+  }
+  const num = Number(trimmed)
+  if (Number.isFinite(num)) {
+    form.auto_receive_group_intervals[groupName] = Math.max(0, Math.round(num))
+  }
+}
+
+function normalizeGroupReceiveInterval(groupName: string) {
+  const map = form.auto_receive_group_intervals || {}
+  if (!Object.prototype.hasOwnProperty.call(map, groupName)) return
+  const val = Number(map[groupName])
+  if (!Number.isFinite(val) || val <= 0) {
+    map[groupName] = 0
+  } else if (val < 30) {
+    map[groupName] = 30
+  } else {
+    map[groupName] = Math.round(val)
+  }
+}
+
+function setGroupReceiveInterval(groupName: string, minutes: number) {
+  if (!form.auto_receive_group_intervals) {
+    form.auto_receive_group_intervals = {}
+  }
+  form.auto_receive_group_intervals[groupName] = minutes <= 0 ? 0 : Math.max(30, minutes)
+}
+
+function clearGroupReceiveInterval(groupName: string) {
+  if (form.auto_receive_group_intervals) {
+    delete form.auto_receive_group_intervals[groupName]
+  }
+}
+
+function describeGroupReceivePolicy(groupName: string) {
+  const map = form.auto_receive_group_intervals || {}
+  const hasCustom = Object.prototype.hasOwnProperty.call(map, groupName)
+  const effective = hasCustom ? Number(map[groupName]) : Number(form.auto_receive_interval_minutes)
+  if (!Number.isFinite(effective) || effective <= 0) {
+    return hasCustom ? '永不自动收件（仅手动）' : '跟随默认（永不自动收件）'
+  }
+  const safeVal = Math.max(30, Math.round(effective))
+  return hasCustom ? `每 ${safeVal} 分钟自动收件` : `跟随默认（每 ${safeVal} 分钟）`
+}
+
+async function handleToggleApiToken(item: ApiTokenItem) {
+  togglingApiTokenId.value = item.id
   try {
-    const response = await disableApiToken(tokenId)
+    const response = item.enabled ? await disableApiToken(item.id) : await enableApiToken(item.id)
     toastStore.push(response.message, 'success')
     await loadApiTokens()
   } catch (error: any) {
-    toastStore.push(error?.response?.data?.detail || '禁用 API Token 失败', 'error')
+    toastStore.push(error?.response?.data?.detail || (item.enabled ? '禁用 API Token 失败' : '启用 API Token 失败'), 'error')
   } finally {
-    disablingApiTokenId.value = ''
+    togglingApiTokenId.value = ''
+  }
+}
+
+async function handleDeleteApiToken(item: ApiTokenItem) {
+  if (!window.confirm(`确定永久删除 API Token「${item.name}」吗？删除后无法恢复。`)) {
+    return
+  }
+  deletingApiTokenId.value = item.id
+  try {
+    const response = await deleteApiToken(item.id)
+    toastStore.push(response.message, 'success')
+    await loadApiTokens()
+  } catch (error: any) {
+    toastStore.push(error?.response?.data?.detail || '删除 API Token 失败', 'error')
+  } finally {
+    deletingApiTokenId.value = ''
   }
 }
 

@@ -1,6 +1,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { fetchMe, login as loginRequest } from '@/api/auth'
+import { useDashboardStore } from '@/stores/dashboard'
 import type { AuthUser } from '@/types'
 
 const TOKEN_KEY = 'easymail-token'
@@ -41,7 +42,8 @@ export const useAuthStore = defineStore('auth', () => {
   function logout() {
     token.value = ''
     user.value = null
-    localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem('easymail-token')
+    useDashboardStore().reset()
   }
 
   return {

@@ -240,7 +240,15 @@
                 </button>
 
                 <div
-                  v-if="!paginatedAccounts.length"
+                  v-if="isInitialLoading"
+                  class="empty-state rounded-2xl border border-dashed border-gray-200 py-8 dark:border-dark-700"
+                >
+                  <span class="spinner mb-2 h-5 w-5"></span>
+                  <div class="empty-state-title text-sm">正在加载邮箱...</div>
+                  <div class="empty-state-description text-xs">正在同步分组、账号与状态信息。</div>
+                </div>
+                <div
+                  v-else-if="!paginatedAccounts.length"
                   class="empty-state rounded-2xl border border-dashed border-gray-200 py-8 dark:border-dark-700"
                 >
                   <div class="empty-state-title text-sm">当前分组没有邮箱</div>
@@ -343,7 +351,15 @@
                 </div>
 
                 <div
-                  v-if="!groupedMails.length"
+                  v-if="isInitialLoading"
+                  class="empty-state rounded-2xl border border-dashed border-gray-200 py-8 dark:border-dark-700"
+                >
+                  <span class="spinner mb-2 h-5 w-5"></span>
+                  <div class="empty-state-title text-sm">正在加载邮件...</div>
+                  <div class="empty-state-description text-xs">正在读取本地缓存与收件状态。</div>
+                </div>
+                <div
+                  v-else-if="!groupedMails.length"
                   class="empty-state rounded-2xl border border-dashed border-gray-200 py-8 dark:border-dark-700"
                 >
                   <Icon name="inbox" size="lg" class="empty-state-icon" />
@@ -1144,6 +1160,8 @@ import {
 } from '@/api/dashboard'
 import Icon from '@/components/common/Icon.vue'
 import AppLayout from '@/components/layout/AppLayout.vue'
+import { apiBase } from '@/config'
+import { useDashboardStore } from '@/stores/dashboard'
 import { useToastStore } from '@/stores/toast'
 import type {
   AccountIssue,
@@ -1173,7 +1191,18 @@ type TagOption = {
   priority: number
 }
 
-const dashboard = ref<DashboardState | null>(null)
+const dashboardStore = useDashboardStore()
+const dashboard = computed<DashboardState | null>({
+  get: () => dashboardStore.state,
+  set: (value) => {
+    if (value) {
+      dashboardStore.setState(value)
+    } else {
+      dashboardStore.reset()
+    }
+  },
+})
+const isInitialLoading = computed(() => !dashboard.value && dashboardStore.loading)
 const selectedGroupKey = ref('未分组')
 const selectedTagKey = ref('')
 const selectedAccountEmail = ref<string | null>(null)
@@ -1334,6 +1363,10 @@ const flagOptions = [
 let refreshTimer: number | null = null
 let refreshingState = false
 let handleVisibilityChange: (() => void) | null = null
+let sseAbortController: AbortController | null = null
+let sseReconnectTimer: number | null = null
+let sseDebounceTimer: number | null = null
+let sseConnected = false
 let bodyTimer: number | null = null
 let graphReauthTimer: number | null = null
 let accountMetaPopoverTimer: number | null = null
@@ -1587,25 +1620,25 @@ const headerMetrics = computed<HeaderMetric[]>(() => [
   {
     icon: 'mail',
     label: '邮箱',
-    value: dashboard.value?.overview.total_accounts ?? 0,
+    value: isInitialLoading.value ? '...' : (dashboard.value?.overview.total_accounts ?? 0),
   },
   {
     key: 'success',
     icon: 'shield',
     label: '成功',
-    value: dashboard.value?.overview.success_accounts ?? 0,
+    value: isInitialLoading.value ? '...' : (dashboard.value?.overview.success_accounts ?? 0),
     clickable: true,
   },
   {
     icon: 'inbox',
     label: '未读',
-    value: dashboard.value?.overview.unread_mails ?? 0,
+    value: isInitialLoading.value ? '...' : (dashboard.value?.overview.unread_mails ?? 0),
   },
   {
     key: 'queue',
     icon: 'refresh',
     label: '队列',
-    value: `${dashboard.value?.overview.queue.percent ?? 0}%`,
+    value: isInitialLoading.value ? '...' : `${dashboard.value?.overview.queue.percent ?? 0}%`,
     clickable: true,
   },
 ])
@@ -1764,18 +1797,101 @@ watch(
   { deep: true },
 )
 
+function scheduleEventRefresh() {
+  if (sseDebounceTimer) return
+  sseDebounceTimer = window.setTimeout(() => {
+    sseDebounceTimer = null
+    refreshState(true)
+  }, 180)
+}
+
+function stopEventStream() {
+  sseConnected = false
+  if (sseReconnectTimer) {
+    window.clearTimeout(sseReconnectTimer)
+    sseReconnectTimer = null
+  }
+  if (sseDebounceTimer) {
+    window.clearTimeout(sseDebounceTimer)
+    sseDebounceTimer = null
+  }
+  if (sseAbortController) {
+    sseAbortController.abort()
+    sseAbortController = null
+  }
+}
+
+async function startEventStream() {
+  stopEventStream()
+  if (document.hidden) return
+  const token = localStorage.getItem('easymail-token')
+  if (!token) return
+  const controller = new AbortController()
+  sseAbortController = controller
+  try {
+    const response = await fetch(`${apiBase}/events`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'text/event-stream',
+      },
+      signal: controller.signal,
+    })
+    if (!response.ok || !response.body) {
+      throw new Error(`SSE status ${response.status}`)
+    }
+    sseConnected = true
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue
+        const raw = line.slice(5).trim()
+        if (!raw) continue
+        try {
+          const event = JSON.parse(raw)
+          if (event?.type && event.type !== 'connected') {
+            scheduleEventRefresh()
+          }
+        } catch {
+          // Ignore malformed event payloads.
+        }
+      }
+    }
+  } catch {
+    // Reconnect silently unless aborted by unmount/visibility change.
+  } finally {
+    sseConnected = false
+    if (sseAbortController === controller && !controller.signal.aborted && !document.hidden) {
+      sseReconnectTimer = window.setTimeout(() => {
+        startEventStream()
+      }, 3000)
+    }
+  }
+}
+
 onMounted(async () => {
   const storedTaxonomyWidth = Number(localStorage.getItem('easymail-taxonomy-width') || '142')
   taxonomyPaneWidth.value = Math.min(240, Math.max(118, storedTaxonomyWidth || 142))
-  await refreshState()
+  await refreshState(Boolean(dashboard.value))
+  startEventStream()
   refreshTimer = window.setInterval(() => {
-    if (!document.hidden) {
+    if (!document.hidden && !sseConnected) {
       refreshState(true)
     }
   }, 4000)
   handleVisibilityChange = () => {
-    if (!document.hidden) {
+    if (document.hidden) {
+      stopEventStream()
+    } else {
       refreshState(true)
+      startEventStream()
     }
   }
   document.addEventListener('visibilitychange', handleVisibilityChange)
@@ -1785,6 +1901,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (refreshTimer) window.clearInterval(refreshTimer)
+  stopEventStream()
   stopBodyPolling()
   stopGraphReauthPolling()
   if (pageSizingFrame) window.cancelAnimationFrame(pageSizingFrame)
@@ -1849,6 +1966,9 @@ function setupAutoPageSizing() {
 async function refreshState(silent = false) {
   if (silent && refreshingState) return
   refreshingState = true
+  if (!dashboard.value) {
+    dashboardStore.loading = true
+  }
   try {
     const response = await getDashboardState()
     dashboard.value = response.data
@@ -1880,6 +2000,7 @@ async function refreshState(silent = false) {
       showError(error?.response?.data?.detail || '加载后台数据失败')
     }
   } finally {
+    dashboardStore.loading = false
     refreshingState = false
   }
 }

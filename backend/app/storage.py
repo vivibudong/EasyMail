@@ -22,6 +22,7 @@ from .models import (
 class SqliteStorage:
     MAX_APP_LOGS = 5000
     MAX_REFRESH_HISTORY = 200
+    MAX_NOTIFIED_MAILS = 50000
 
     def __init__(self, base_dir: Path) -> None:
         self.base_dir = base_dir
@@ -121,6 +122,11 @@ class SqliteStorage:
 
                 CREATE INDEX IF NOT EXISTS idx_api_tokens_hash
                 ON api_tokens(token_hash);
+
+                CREATE TABLE IF NOT EXISTS notified_mails (
+                    dedup_key TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
             self._prune_old_records(connection)
@@ -581,10 +587,45 @@ class SqliteStorage:
             )
         return items
 
+    def load_notified_keys(self) -> set[str]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT dedup_key FROM notified_mails").fetchall()
+        return {str(row["dedup_key"]) for row in rows}
+
+    def add_notified_keys(self, keys: set[str] | list[str]) -> None:
+        cleaned = [str(item).strip() for item in keys if str(item).strip()]
+        if not cleaned:
+            return
+        now = self._utc_now_iso()
+        with self._connect() as connection:
+            connection.executemany(
+                "INSERT OR IGNORE INTO notified_mails(dedup_key, created_at) VALUES(?, ?)",
+                [(item, now) for item in cleaned],
+            )
+            count = int(connection.execute("SELECT COUNT(*) FROM notified_mails").fetchone()[0])
+            if count > self.MAX_NOTIFIED_MAILS + 5000:
+                connection.execute(
+                    """
+                    DELETE FROM notified_mails
+                    WHERE rowid <= (
+                        SELECT rowid FROM notified_mails ORDER BY rowid DESC LIMIT 1 OFFSET ?
+                    )
+                    """,
+                    (self.MAX_NOTIFIED_MAILS,),
+                )
+
     def set_api_token_enabled(self, token_id: str, enabled: bool) -> bool:
         with self._connect() as connection:
             cursor = connection.execute(
                 "UPDATE api_tokens SET enabled = ? WHERE id = ?",
                 (1 if enabled else 0, token_id),
+            )
+        return cursor.rowcount > 0
+
+    def delete_api_token(self, token_id: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM api_tokens WHERE id = ?",
+                (token_id,),
             )
         return cursor.rowcount > 0

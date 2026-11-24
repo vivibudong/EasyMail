@@ -81,7 +81,10 @@ class AppSettings:
     custom_groups: list[GroupDefinition] = field(default_factory=list)
     custom_tags: list[TagDefinition] = field(default_factory=list)
     auto_receive_enabled: bool = False
-    auto_receive_interval_minutes: int = 15
+    auto_receive_interval_minutes: int = 30
+    auto_receive_group_intervals: dict[str, int] = field(default_factory=dict)
+    auto_receive_pause_failed: bool = True
+    auto_receive_incremental: bool = True
     token_refresh_enabled: bool = False
     token_refresh_interval_minutes: int = 360
     backup_enabled: bool = False
@@ -171,6 +174,9 @@ def mail_item_from_dict(data: dict) -> Optional[MailItem]:
 
 
 def account_to_dict(a: MailAccount) -> dict:
+    persisted_status = a.status
+    if persisted_status in {"登录中", "收信中"}:
+        persisted_status = "登录成功" if (a.cached_access_token or a.cached_graph_access_token or a.auth_method not in {"", "-"}) else "已缓存"
     return {
         "email": a.email,
         "password": a.password,
@@ -178,6 +184,11 @@ def account_to_dict(a: MailAccount) -> dict:
         "token": a.token,
         "imap_host": a.imap_host,
         "imap_port": a.imap_port,
+        "status": persisted_status,
+        "last_check": a.last_check,
+        "unseen_count": a.unseen_count,
+        "last_error": a.last_error,
+        "auth_method": a.auth_method,
         "cached_access_token": a.cached_access_token,
         "cached_access_expire_at": a.cached_access_expire_at,
         "cached_graph_access_token": a.cached_graph_access_token,
@@ -197,6 +208,22 @@ def account_from_dict(data: dict) -> Optional[MailAccount]:
         port = int(data.get("imap_port", IMAP_PORT))
     except Exception:
         port = IMAP_PORT
+    raw_status = str(data.get("status", "") or "").strip()
+    cached_access = str(data.get("cached_access_token", "") or "")
+    cached_graph = str(data.get("cached_graph_access_token", "") or "")
+    auth_method = str(data.get("auth_method", "-") or "-")
+    if raw_status in {"登录中", "收信中"}:
+        restored_status = "登录成功" if (cached_access or cached_graph or auth_method not in {"", "-"}) else "待登录"
+    elif raw_status in {"登录成功", "登录失败", "收信失败", "已缓存", "待登录", "未登录"}:
+        restored_status = raw_status
+    elif cached_access or cached_graph:
+        restored_status = "登录成功"
+    else:
+        restored_status = "待登录"
+    try:
+        unseen_count = max(0, int(data.get("unseen_count", 0) or 0))
+    except Exception:
+        unseen_count = 0
     return MailAccount(
         email=email_addr,
         password=str(data.get("password", "")),
@@ -204,10 +231,14 @@ def account_from_dict(data: dict) -> Optional[MailAccount]:
         token=str(data.get("token", "")),
         imap_host=str(data.get("imap_host", IMAP_HOST)),
         imap_port=port,
-        status="待登录",
-        cached_access_token=str(data.get("cached_access_token", "")),
+        status=restored_status,
+        last_check=str(data.get("last_check", "-") or "-"),
+        unseen_count=unseen_count,
+        last_error=str(data.get("last_error", "") or ""),
+        auth_method=auth_method,
+        cached_access_token=cached_access,
         cached_access_expire_at=float(data.get("cached_access_expire_at", 0.0) or 0.0),
-        cached_graph_access_token=str(data.get("cached_graph_access_token", "")),
+        cached_graph_access_token=cached_graph,
         cached_graph_access_expire_at=float(data.get("cached_graph_access_expire_at", 0.0) or 0.0),
         flag_color=str(data.get("flag_color", "")),
         group_name=str(data.get("group_name", "未分组") or "未分组"),
@@ -235,6 +266,9 @@ def settings_to_dict(settings: AppSettings) -> dict:
         ],
         "auto_receive_enabled": settings.auto_receive_enabled,
         "auto_receive_interval_minutes": settings.auto_receive_interval_minutes,
+        "auto_receive_group_intervals": normalize_group_receive_intervals(settings.auto_receive_group_intervals),
+        "auto_receive_pause_failed": settings.auto_receive_pause_failed,
+        "auto_receive_incremental": settings.auto_receive_incremental,
         "token_refresh_enabled": settings.token_refresh_enabled,
         "token_refresh_interval_minutes": settings.token_refresh_interval_minutes,
         "backup_enabled": settings.backup_enabled,
@@ -278,6 +312,25 @@ def normalize_import_delimiters(values: object) -> list[str]:
         if value not in cleaned:
             cleaned.append(value)
     return cleaned or DEFAULT_IMPORT_DELIMITERS.copy()
+
+
+def normalize_group_receive_intervals(values: object) -> dict[str, int]:
+    if not isinstance(values, dict):
+        return {}
+    cleaned: dict[str, int] = {}
+    for raw_key, raw_val in values.items():
+        name = str(raw_key or "").strip()
+        if not name:
+            continue
+        try:
+            minutes = int(raw_val)
+        except Exception:
+            continue
+        if minutes <= 0:
+            cleaned[name] = 0
+        else:
+            cleaned[name] = max(30, min(10080, minutes))
+    return cleaned
 
 
 def normalize_telegram_mail_groups(values: object) -> list[str]:
@@ -346,7 +399,14 @@ def settings_from_dict(data: dict) -> AppSettings:
         custom_groups=group_items,
         custom_tags=tag_items,
         auto_receive_enabled=bool(data.get("auto_receive_enabled", False)),
-        auto_receive_interval_minutes=int(data.get("auto_receive_interval_minutes", 15) or 15),
+        auto_receive_interval_minutes=(
+            0
+            if int(data.get("auto_receive_interval_minutes", 30) if data.get("auto_receive_interval_minutes") is not None else 30) <= 0
+            else max(30, int(data.get("auto_receive_interval_minutes", 30) or 30))
+        ),
+        auto_receive_group_intervals=normalize_group_receive_intervals(data.get("auto_receive_group_intervals", {})),
+        auto_receive_pause_failed=bool(data.get("auto_receive_pause_failed", True)),
+        auto_receive_incremental=bool(data.get("auto_receive_incremental", True)),
         token_refresh_enabled=bool(data.get("token_refresh_enabled", False)),
         token_refresh_interval_minutes=int(data.get("token_refresh_interval_minutes", 360) or 360),
         backup_enabled=bool(data.get("backup_enabled", False)),
