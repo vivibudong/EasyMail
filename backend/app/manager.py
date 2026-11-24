@@ -1896,7 +1896,15 @@ class MailManager:
                         account.status = "登录成功"
                         account.last_error = ""
                         self._queue_mail_notifications(account, new_items)
-                        self.log_event("info", "mail_fetch", "receive_success", account.email, "收件成功", {"unseen": unseen, "method": account.auth_method})
+                        if new_items:
+                            self.log_event(
+                                "info",
+                                "mail_fetch",
+                                "receive_success",
+                                account.email,
+                                f"收到 {len(new_items)} 封新邮件",
+                                {"new_count": len(new_items), "unseen": unseen, "method": account.auth_method},
+                            )
                     else:
                         account.status = "收信失败"
                         account.last_error = message

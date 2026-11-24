@@ -123,6 +123,43 @@ class SqliteStorage:
                 ON api_tokens(token_hash);
                 """
             )
+            self._prune_old_records(connection)
+            self._ensure_incremental_vacuum(connection)
+
+    def _prune_old_records(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            DELETE FROM app_logs
+            WHERE id <= (
+                SELECT id FROM app_logs ORDER BY id DESC LIMIT 1 OFFSET ?
+            )
+            """,
+            (self.MAX_APP_LOGS,),
+        )
+        connection.execute(
+            """
+            DELETE FROM refresh_history
+            WHERE id <= (
+                SELECT id FROM refresh_history ORDER BY id DESC LIMIT 1 OFFSET ?
+            )
+            """,
+            (self.MAX_REFRESH_HISTORY,),
+        )
+
+    def _ensure_incremental_vacuum(self, connection: sqlite3.Connection) -> None:
+        try:
+            auto_vacuum_mode = int(connection.execute("PRAGMA auto_vacuum").fetchone()[0])
+            freelist_count = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+            if auto_vacuum_mode != 2:
+                connection.commit()
+                connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
+                connection.execute("VACUUM")
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            elif freelist_count > 2000:
+                connection.execute("PRAGMA incremental_vacuum(2000)")
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            pass
 
     def load_accounts(self) -> list[MailAccount]:
         with self._connect() as connection:
@@ -300,8 +337,8 @@ class SqliteStorage:
             connection.execute(
                 """
                 DELETE FROM refresh_history
-                WHERE id NOT IN (
-                    SELECT id FROM refresh_history ORDER BY id DESC LIMIT ?
+                WHERE id <= (
+                    SELECT id FROM refresh_history ORDER BY id DESC LIMIT 1 OFFSET ?
                 )
                 """,
                 (self.MAX_REFRESH_HISTORY,),
@@ -398,12 +435,13 @@ class SqliteStorage:
                 connection.execute(
                     """
                     DELETE FROM app_logs
-                    WHERE id NOT IN (
-                        SELECT id FROM app_logs ORDER BY id DESC LIMIT ?
+                    WHERE id <= (
+                        SELECT id FROM app_logs ORDER BY id DESC LIMIT 1 OFFSET ?
                     )
                     """,
                     (self.MAX_APP_LOGS,),
                 )
+                connection.execute("PRAGMA incremental_vacuum(200)")
 
     def list_logs(
         self,
