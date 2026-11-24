@@ -114,29 +114,8 @@
     @apply dark:shadow-amber-500/20;
   }
 
-  .btn-stripe {
-    @apply bg-[#635bff] text-white shadow-md shadow-[#635bff]/25;
-    @apply hover:bg-[#5851ea] hover:shadow-lg hover:shadow-[#635bff]/30;
-    @apply dark:bg-[#7a73ff] dark:shadow-[#7a73ff]/20;
-    @apply dark:hover:bg-[#635bff];
-  }
-
-  .btn-alipay {
-    @apply bg-[#00AEEF] text-white shadow-md shadow-[#00AEEF]/25;
-    @apply hover:bg-[#009dd6] hover:shadow-lg hover:shadow-[#00AEEF]/30;
-    @apply active:bg-[#008cbe];
-    @apply dark:shadow-[#00AEEF]/20;
-  }
-
-  .btn-wxpay {
-    @apply bg-[#2BB741] text-white shadow-md shadow-[#2BB741]/25;
-    @apply hover:bg-[#24a038] hover:shadow-lg hover:shadow-[#2BB741]/30;
-    @apply active:bg-[#1d8a2f];
-    @apply dark:shadow-[#2BB741]/20;
-  }
-
   .btn-sm {
-    @apply rounded-lg px-3 py-1.5 text-xs;
+    @apply rounded-lg px-2.5 py-1 text-xs;
   }
 
   .btn-md {
@@ -227,64 +206,16 @@
 
   .card-header {
     @apply border-b border-gray-100 dark:border-dark-700;
-    @apply px-6 py-4;
+    @apply px-5 py-3.5;
   }
 
   .card-body {
-    @apply p-6;
+    @apply p-5;
   }
 
   .card-footer {
     @apply border-t border-gray-100 dark:border-dark-700;
-    @apply px-6 py-4;
-  }
-
-  /* ============ 统计卡片 ============ */
-  .stat-card {
-    @apply card p-5;
-    @apply flex items-start gap-4;
-  }
-
-  .stat-icon {
-    @apply h-12 w-12 rounded-xl;
-    @apply flex items-center justify-center;
-    @apply text-xl;
-  }
-
-  .stat-icon-primary {
-    @apply bg-primary-100 text-primary-600 dark:bg-primary-900/30 dark:text-primary-400;
-  }
-
-  .stat-icon-success {
-    @apply bg-sky-100 text-sky-600 dark:bg-sky-900/30 dark:text-sky-400;
-  }
-
-  .stat-icon-warning {
-    @apply bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400;
-  }
-
-  .stat-icon-danger {
-    @apply bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400;
-  }
-
-  .stat-value {
-    @apply text-2xl font-bold text-gray-900 dark:text-white truncate;
-  }
-
-  .stat-label {
-    @apply text-sm text-gray-500 dark:text-dark-400;
-  }
-
-  .stat-trend {
-    @apply mt-1 flex items-center gap-1 text-xs font-medium;
-  }
-
-  .stat-trend-up {
-    @apply text-sky-600 dark:text-sky-400;
-  }
-
-  .stat-trend-down {
-    @apply text-red-600 dark:text-red-400;
+    @apply px-5 py-3.5;
   }
 
   /* ============ 表格样式 ============ */
@@ -516,92 +447,28 @@
     @apply border-l-primary-500;
   }
 
-  /* ============ 侧边栏 ============ */
-  .sidebar {
-    @apply fixed inset-y-0 left-0 z-40;
-    @apply w-64 bg-white dark:bg-dark-900;
-    @apply border-r border-gray-200 dark:border-dark-800;
-    @apply flex flex-col;
-    @apply transition-transform duration-300;
-    transition-property: width, transform;
-  }
-
-  .sidebar-header {
-    @apply h-14 px-4;
-    @apply flex items-center gap-3;
-    @apply border-b border-gray-100 dark:border-dark-800;
-    transition:
-      padding 0.2s ease,
-      gap 0.2s ease;
-  }
-
-  .sidebar-nav {
-    @apply flex-1 overflow-y-auto px-2.5 py-3;
-  }
-
-  .sidebar-link {
-    @apply flex items-center gap-3 rounded-xl py-2;
-    @apply overflow-hidden;
-    @apply text-[13px] font-medium;
-    @apply text-gray-600 dark:text-dark-300;
-    @apply transition-all duration-200;
-    @apply hover:bg-gray-100 dark:hover:bg-dark-800;
-    @apply hover:text-gray-900 dark:hover:text-white;
-    padding-left: 1.0625rem;
-    padding-right: 0.875rem;
-  }
-
-  .sidebar-link-active {
-    @apply bg-primary-50 dark:bg-primary-900/20;
-    @apply text-primary-600 dark:text-primary-400;
-    @apply hover:bg-primary-100 dark:hover:bg-primary-900/30;
-  }
-
-  .sidebar-section {
-    @apply mb-6;
-  }
-
-  .sidebar-section-title {
-    @apply mb-2 px-3;
-    @apply text-xs font-semibold uppercase tracking-wider;
-    @apply text-gray-400 dark:text-dark-500;
-  }
-
-  /* ============ 页面头部 ============ */
-  .page-header {
-    @apply mb-6;
-  }
-
-  .page-title {
-    @apply text-2xl font-bold text-gray-900 dark:text-white;
-  }
-
-  .page-description {
-    @apply mt-1 text-sm text-gray-500 dark:text-dark-400;
-  }
-
   /* ============ 空状态 ============ */
   .empty-state {
-    @apply flex flex-col items-center justify-center px-4 py-12;
+    @apply flex flex-col items-center justify-center px-4 py-8;
     @apply text-center;
   }
 
   .empty-state-icon {
-    @apply mb-4 h-16 w-16;
+    @apply mb-3 h-10 w-10;
     @apply text-gray-300 dark:text-dark-600;
   }
 
   .empty-state-title {
-    @apply mb-1 text-lg font-medium text-gray-900 dark:text-white;
+    @apply mb-1 text-sm font-medium text-gray-900 dark:text-white;
   }
 
   .empty-state-description {
-    @apply max-w-sm text-sm text-gray-500 dark:text-dark-400;
+    @apply max-w-xs text-xs text-gray-500 dark:text-dark-400;
   }
 
   /* ============ 加载状态 ============ */
   .spinner {
-    @apply h-5 w-5 rounded-full border-2 border-current border-t-transparent;
+    @apply h-4 w-4 rounded-full border-2 border-current border-t-transparent;
     @apply animate-spin;
   }
 
@@ -609,179 +476,72 @@
     @apply animate-pulse rounded bg-gray-200 dark:bg-dark-700;
   }
 
-  /* ============ 分隔线 ============ */
-  .divider {
-    @apply my-4 h-px bg-gray-200 dark:bg-dark-700;
-  }
-
-  /* ============ 标签页 ============ */
-  .tabs {
-    @apply flex gap-1 p-1;
-    @apply rounded-xl bg-gray-100 dark:bg-dark-800;
-  }
-
-  .tab {
-    @apply rounded-lg px-4 py-2 text-sm font-medium;
-    @apply text-gray-600 dark:text-dark-400;
-    @apply transition-all duration-200;
-    @apply hover:text-gray-900 dark:hover:text-white;
-  }
-
-  .tab-active {
-    @apply bg-white dark:bg-dark-700;
-    @apply text-gray-900 dark:text-white;
-    @apply shadow-sm;
-  }
-
   /* ============ 进度条 ============ */
   .progress {
-    @apply h-2 overflow-hidden rounded-full bg-gray-200 dark:bg-dark-700;
+    @apply h-1.5 overflow-hidden rounded-full bg-gray-200/80 dark:bg-dark-700;
   }
 
   .progress-bar {
-    @apply h-full bg-gradient-to-r from-primary-500 to-primary-400;
+    @apply h-full bg-gradient-to-r from-primary-500 to-sky-400;
     @apply transition-all duration-300;
-  }
-
-  /* ============ 开关 ============ */
-  .switch {
-    @apply relative h-6 w-11 cursor-pointer rounded-full;
-    @apply bg-gray-300 dark:bg-dark-600;
-    @apply transition-colors duration-200;
-  }
-
-  .switch-active {
-    @apply bg-primary-500;
-  }
-
-  .switch-thumb {
-    @apply absolute left-0.5 top-0.5 h-5 w-5 rounded-full;
-    @apply bg-white shadow-sm;
-    @apply transition-transform duration-200;
-  }
-
-  .switch-active .switch-thumb {
-    @apply translate-x-5;
-  }
-
-  /* ============ 代码块 ============ */
-  .code {
-    @apply font-mono text-sm;
-    @apply bg-gray-100 dark:bg-dark-800;
-    @apply rounded px-1.5 py-0.5;
-    @apply text-primary-600 dark:text-primary-400;
-  }
-
-  .code-block {
-    @apply font-mono text-sm;
-    @apply bg-gray-900 text-gray-100;
-    @apply overflow-x-auto rounded-xl p-4;
-  }
-
-  /* ============ Tour Description ============ */
-  .tour-step-description {
-    @apply space-y-3 text-sm leading-relaxed text-gray-700 dark:text-gray-200;
-  }
-
-  .tour-step-description ul {
-    @apply list-disc pl-5;
-  }
-
-  .tour-step-description ol {
-    @apply list-decimal pl-5;
-  }
-
-  .tour-step-description li + li {
-    @apply mt-1;
-  }
-
-  .tour-info-box {
-    @apply rounded-md border-l-4 border-blue-500 bg-blue-50 px-3 py-2 text-xs text-blue-900;
-    @apply dark:border-blue-400 dark:bg-blue-950/40 dark:text-blue-200;
-  }
-
-  .tour-success-box {
-    @apply rounded-md border-l-4 border-sky-500 bg-sky-50 px-3 py-2 text-xs text-sky-900;
-    @apply dark:border-sky-400 dark:bg-sky-950/40 dark:text-sky-200;
-  }
-
-  .tour-warning-box {
-    @apply rounded-md border-l-4 border-amber-500 bg-amber-50 px-3 py-2 text-xs text-amber-900;
-    @apply dark:border-amber-400 dark:bg-amber-950/40 dark:text-amber-200;
-  }
-
-  .tour-error-box {
-    @apply rounded-md border-l-4 border-red-500 bg-red-50 px-3 py-2 text-xs text-red-900;
-    @apply dark:border-red-400 dark:bg-red-950/40 dark:text-red-200;
-  }
-
-  /* ============ 表格页面布局优化 ============ */
-  /* 表格容器 - 默认仅支持水平滚动 */
-  .table-wrapper {
-    overflow-x: auto;
-  }
-
-  /* 表头固定时添加底部阴影，增强视觉层次 */
-  .table-wrapper thead.sticky {
-    box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1);
   }
 
   /* ============ Mail Workbench ============ */
   .mail-workbench {
-    @apply grid h-full min-h-0 min-w-[1180px];
-    grid-template-columns: var(--taxonomy-width, 142px) 292px 352px minmax(320px, 1fr);
+    @apply grid h-full min-h-0 min-w-[960px];
+    grid-template-columns: var(--taxonomy-width, 136px) minmax(228px, 266px) minmax(260px, 316px) minmax(300px, 1fr);
   }
 
   .mail-pane {
-    @apply relative flex min-h-0 flex-col bg-white/50 dark:bg-dark-900/20;
+    @apply relative flex min-h-0 flex-col bg-white dark:bg-dark-900/30;
   }
 
   .pane-resizer {
-    @apply absolute right-[-3px] top-0 z-20 h-full w-1.5 cursor-col-resize bg-transparent transition-colors hover:bg-primary-300/50;
+    @apply absolute right-[-3px] top-0 z-20 h-full w-1.5 cursor-col-resize bg-transparent transition-colors hover:bg-primary-300/60;
   }
 
   .pane-toolbar {
-    @apply flex items-center justify-between gap-2 border-b border-gray-100 px-3 py-2.5 dark:border-dark-800;
+    @apply flex shrink-0 items-center justify-between gap-2 border-b border-gray-100 px-3 py-2 dark:border-dark-800;
   }
 
   .pane-status {
-    @apply border-b border-gray-100 px-3 py-2 text-[11px] text-gray-500 dark:border-dark-800 dark:text-dark-400;
+    @apply shrink-0 border-b border-gray-100 bg-gray-50/60 px-3 py-1.5 text-[11px] text-gray-500 dark:border-dark-800 dark:bg-dark-800/30 dark:text-dark-400;
   }
 
   .pane-scroll {
-    @apply flex-1 overflow-y-auto p-3;
+    @apply flex-1 overflow-y-auto px-2 py-1.5;
   }
 
   .account-row {
-    @apply mb-1.5 flex min-h-[78px] w-full items-start gap-2.5 rounded-xl border border-gray-100 bg-white/80 px-2.5 py-2.5 transition-all duration-200 hover:border-gray-200 hover:shadow-sm dark:border-dark-700/60 dark:bg-dark-800/60 dark:hover:border-dark-600;
+    @apply mb-0.5 flex min-h-[52px] w-full items-center gap-2 rounded-lg border border-transparent px-2 py-1.5 transition-colors duration-150 hover:bg-gray-50 dark:hover:bg-dark-800/60;
   }
 
   .account-row-active {
-    @apply border-primary-200 bg-primary-50/70 shadow-sm dark:border-primary-800/50 dark:bg-primary-900/10;
+    @apply border-primary-200/80 bg-primary-50/70 dark:border-primary-800/50 dark:bg-primary-900/15;
   }
 
   .mail-row {
-    @apply mb-1.5 block w-full rounded-xl border border-gray-100 bg-white/80 px-3 py-2.5 text-left transition-all duration-200 hover:border-gray-200 hover:shadow-sm dark:border-dark-700/60 dark:bg-dark-800/60 dark:hover:border-dark-600;
+    @apply mb-0.5 block w-full rounded-lg border border-transparent px-2.5 py-2 text-left transition-colors duration-150 hover:bg-gray-50 dark:hover:bg-dark-800/60;
   }
 
   .mail-row-unread {
-    @apply border-primary-200 bg-primary-50/60 dark:border-primary-800/50 dark:bg-primary-900/10;
+    @apply bg-primary-50/45 dark:bg-primary-900/10;
   }
 
   .mail-row-active {
-    @apply border-primary-300 shadow-sm dark:border-primary-700;
+    @apply border-primary-200/90 bg-primary-50/80 dark:border-primary-700/60 dark:bg-primary-900/20;
   }
 
   .mail-body {
-    @apply min-h-full whitespace-pre-wrap rounded-xl border border-gray-100 bg-white/80 p-4 text-[13px] leading-6 text-gray-700 dark:border-dark-700 dark:bg-dark-800/60 dark:text-dark-200;
+    @apply min-h-full whitespace-pre-wrap rounded-xl bg-gray-50/50 p-4 text-[13px] leading-6 text-gray-700 dark:bg-dark-800/40 dark:text-dark-200;
   }
 
   .mail-html-body {
-    @apply whitespace-normal;
+    @apply flex h-full flex-col whitespace-normal p-2.5;
   }
 
   .mail-html-frame {
-    @apply h-full min-h-[520px] w-full rounded-xl border-0 bg-white;
+    @apply w-full flex-1 min-h-[360px] rounded-lg border-0 bg-white dark:bg-slate-100;
   }
 
   .fade-enter-active,

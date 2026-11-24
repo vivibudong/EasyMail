@@ -1,48 +1,68 @@
 <template>
   <AppLayout
     title="后台面板"
-    description="面向多邮箱账号的统一管理与收件工作台。"
     :metrics="headerMetrics"
     :non-success-accounts="nonSuccessAccounts"
     :queue-details="queueDetails"
     :show-task-button="false"
+    :full-height="true"
     @show-account-detail="handleShowAccountDetail"
   >
-    <div class="h-[calc(100vh-74px)] min-h-[calc(100vh-74px)]">
-      <section class="card flex h-full flex-col overflow-hidden">
-        <div class="card-header flex flex-wrap items-center gap-2 px-4 py-3">
-          <button class="btn btn-secondary btn-sm" @click="triggerImport">导入账号</button>
-          <button class="btn btn-danger btn-sm" @click="handleReceiveAll">收取全部</button>
-          <button class="btn btn-secondary btn-sm" :disabled="!hasSelection" @click="handleReceiveChecked">
-            勾选收件
-          </button>
-          <button class="btn btn-secondary btn-sm" :disabled="!hasSelection" @click="handleReloginChecked">
-            重新登录
-          </button>
-          <button class="btn btn-secondary btn-sm" :disabled="!hasSelection" @click="openBatchEditDialog">
-            批量整理
-          </button>
-          <button class="btn btn-secondary btn-sm" :disabled="!hasSelection" @click="handleDeleteChecked">
-            删除勾选
-          </button>
-          <button class="btn btn-secondary btn-sm" @click="handleExportAccounts">导出邮箱</button>
-          <div class="min-w-0 basis-full sm:basis-auto sm:min-w-[220px] flex-1">
-            <div class="flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-dark-400">
-              <span>当前分组：{{ selectedGroupLabel }}</span>
-              <span>当前邮箱：{{ selectedAccountEmail || '全部邮箱' }}</span>
-              <span>失败账号：{{ nonSuccessAccounts.length }}</span>
-            </div>
-            <div class="progress mt-1.5 h-1.5">
-              <div class="progress-bar" :style="{ width: `${dashboard?.overview.queue.percent ?? 0}%` }"></div>
+    <div class="h-full min-h-0">
+      <section class="card flex h-full min-h-0 flex-col overflow-hidden">
+        <div class="flex shrink-0 flex-wrap items-center gap-2 border-b border-gray-100 px-3 py-2 dark:border-dark-800">
+          <div class="flex items-center gap-1.5">
+            <button class="btn btn-primary btn-sm" @click="handleReceiveAll">收取全部</button>
+            <button class="btn btn-secondary btn-sm" @click="triggerImport">导入</button>
+            <button class="btn btn-secondary btn-sm" @click="handleExportAccounts">导出</button>
+          </div>
+
+          <div
+            v-if="hasSelection"
+            class="flex flex-wrap items-center gap-1.5 rounded-lg border border-primary-200/80 bg-primary-50/60 px-2 py-1 dark:border-primary-800/50 dark:bg-primary-900/15"
+          >
+            <span class="text-[11px] font-semibold text-primary-700 dark:text-primary-300">
+              已选 {{ checkedAccounts.length }}
+            </span>
+            <button class="btn btn-secondary btn-sm py-0.5 text-[11px]" @click="handleReceiveChecked">
+              收件
+            </button>
+            <button class="btn btn-secondary btn-sm py-0.5 text-[11px]" @click="handleReloginChecked">
+              重登
+            </button>
+            <button class="btn btn-secondary btn-sm py-0.5 text-[11px]" @click="openBatchEditDialog">
+              批量整理
+            </button>
+            <button class="btn btn-danger btn-sm py-0.5 text-[11px]" @click="handleDeleteChecked">
+              删除
+            </button>
+            <button
+              class="px-1 text-[11px] text-gray-500 hover:text-gray-800 dark:text-dark-400 dark:hover:text-white"
+              @click="checkedAccounts = []"
+            >
+              取消
+            </button>
+          </div>
+
+          <div class="flex min-w-0 flex-1 items-center gap-2 text-[11px] text-gray-500 dark:text-dark-400">
+            <span class="hidden truncate md:inline">
+              {{ selectedGroupLabel }} · {{ selectedAccountEmail || '全部邮箱' }}
+            </span>
+            <div v-if="hasActiveQueue" class="flex min-w-[110px] max-w-[180px] flex-1 items-center gap-1.5">
+              <span class="spinner h-3 w-3 shrink-0 text-primary-500"></span>
+              <div class="progress flex-1">
+                <div class="progress-bar" :style="{ width: `${dashboard?.overview.queue.percent ?? 0}%` }"></div>
+              </div>
+              <span class="shrink-0 font-mono text-[10px]">{{ dashboard?.overview.queue.percent ?? 0 }}%</span>
             </div>
           </div>
+
           <input
             v-model="searchTerm"
-            class="input w-full sm:min-w-[180px] sm:max-w-[240px] py-2 text-xs"
+            class="input w-full py-1.5 text-xs sm:w-52 lg:w-64"
             type="text"
-            placeholder="全局搜索邮箱 / 主题 / 发件人"
+            placeholder="搜索邮箱 / 主题 / 发件人"
           />
-          <RouterLink to="/settings" class="btn btn-secondary btn-sm">设置</RouterLink>
           <input ref="fileInput" class="hidden" type="file" accept=".txt" @change="handleImportFile" />
         </div>
 
@@ -147,25 +167,22 @@
                 <button class="btn btn-secondary btn-sm px-2 py-1" @click="filterAllMails">全部邮件</button>
               </div>
 
-              <div class="pane-status">
-                <div class="truncate">当前：{{ selectedAccountEmail || '全部邮箱' }}</div>
+              <div v-if="selectedAccount" class="pane-status">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="truncate font-medium text-gray-700 dark:text-dark-200">{{ selectedAccount.email }}</span>
+                  <span class="shrink-0 text-[10px]">{{ selectedAccount.auth_method || '-' }} · {{ selectedAccount.status }}</span>
+                </div>
                 <div
-                  v-if="selectedAccount?.last_error_summary"
+                  v-if="selectedAccount.last_error_summary"
                   class="mt-1 flex items-center gap-2 text-red-500"
                 >
                   <span class="truncate">{{ selectedAccount.last_error_summary }}</span>
                   <button
-                    class="rounded-md border border-red-200 px-1.5 py-0.5 text-[10px] text-red-500 hover:bg-red-50 dark:border-red-800/50 dark:hover:bg-red-900/20"
+                    class="shrink-0 rounded border border-red-200 px-1.5 py-0.5 text-[10px] text-red-500 hover:bg-red-50 dark:border-red-800/50 dark:hover:bg-red-900/20"
                     @click="openAccountDetail(selectedAccount)"
                   >
                     详情
                   </button>
-                </div>
-                <div class="mt-1 truncate text-[11px] text-gray-500 dark:text-dark-400">
-                  认证：{{ selectedAccount?.auth_method || '-' }}
-                </div>
-                <div v-if="!selectedAccount?.last_error_summary" class="mt-1 truncate">
-                  状态：{{ selectedAccount?.status || '-' }}
                 </div>
               </div>
 
@@ -179,17 +196,16 @@
                   @contextmenu.prevent="openContextMenu($event, account.email)"
                 >
                   <input
-                    class="mt-0.5"
                     type="checkbox"
                     :checked="checkedAccounts.includes(account.email)"
                     @click.stop
                     @change="toggleAccount(account.email, ($event.target as HTMLInputElement).checked)"
                   />
                   <span
-                    class="mt-1 inline-block h-2 w-2 rounded-full"
-                    :style="{ backgroundColor: account.flag_color || '#D6EAF8' }"
+                    class="inline-block h-2 w-2 shrink-0 rounded-full"
+                    :style="{ backgroundColor: account.flag_color || '#CBD5E1' }"
                   ></span>
-                  <div class="min-w-0 flex-1 text-left min-h-[54px]">
+                  <div class="min-w-0 flex-1 text-left">
                     <div class="truncate text-[12px] font-medium" :class="statusTextClass(account.status)">
                       {{ account.index }}. {{ account.email }}
                     </div>
@@ -432,28 +448,34 @@
                 </div>
               </div>
 
-              <div class="px-4 pb-2">
+              <div
+                v-if="selectedMailDetail?.verification_codes?.length || showBodyTaskBar"
+                class="shrink-0 border-b border-gray-100 px-3 py-2 dark:border-dark-800"
+              >
                 <div
                   v-if="selectedMailDetail?.verification_codes?.length"
-                  class="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-cyan-100 bg-cyan-50/70 px-3 py-2 text-xs text-cyan-800 dark:border-cyan-900/50 dark:bg-cyan-900/10 dark:text-cyan-200"
+                  class="flex flex-wrap items-center gap-2 rounded-lg border border-cyan-100 bg-cyan-50/70 px-2.5 py-1.5 text-xs text-cyan-800 dark:border-cyan-900/50 dark:bg-cyan-900/10 dark:text-cyan-200"
+                  :class="{ 'mb-2': showBodyTaskBar }"
                 >
                   <span class="font-semibold">提取验证码</span>
                   <button
                     v-for="code in selectedMailDetail.verification_codes"
                     :key="`${selectedMailDetail.local_key}-${code.code}`"
-                    class="rounded-lg bg-white px-2 py-1 font-mono font-semibold text-cyan-700 shadow-sm hover:bg-cyan-100 dark:bg-dark-800 dark:text-cyan-300"
+                    class="rounded-md bg-white px-2 py-0.5 font-mono font-semibold text-cyan-700 shadow-sm hover:bg-cyan-100 dark:bg-dark-800 dark:text-cyan-300"
                     :title="`置信度 ${Math.round(code.confidence * 100)}% · ${code.source}`"
                     @click="copyVerificationCode(code.code)"
                   >
                     {{ code.code }}
                   </button>
                 </div>
-                <div class="mb-1.5 text-[11px] text-gray-500 dark:text-dark-400">
-                  {{ bodyStatusText }}
-                </div>
-                <div class="progress h-1.5">
-                  <div class="progress-bar" :style="{ width: `${bodyProgress}%` }"></div>
-                </div>
+                <template v-if="showBodyTaskBar">
+                  <div class="mb-1 text-[11px] text-gray-500 dark:text-dark-400">
+                    {{ bodyStatusText }}
+                  </div>
+                  <div class="progress h-1">
+                    <div class="progress-bar" :style="{ width: `${bodyProgress}%` }"></div>
+                  </div>
+                </template>
               </div>
 
               <div class="pane-scroll">
@@ -1122,7 +1144,6 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { RouterLink } from 'vue-router'
 import {
   assignAccountGroup,
   batchAssignAccountGroup,
@@ -1615,6 +1636,23 @@ const nonSuccessAccounts = computed<AccountIssue[]>(() =>
 )
 
 const queueDetails = computed(() => dashboard.value?.overview.queue || null)
+const hasActiveQueue = computed(() => {
+  const q = queueDetails.value
+  if (
+    q &&
+    (q.login_busy_email ||
+      q.receive_busy_email ||
+      q.pending_login_emails.length > 0 ||
+      q.pending_receive_emails.length > 0)
+  ) {
+    return true
+  }
+  return allAccounts.value.some((item) => item.status === '收信中' || item.status === '登录中')
+})
+const showBodyTaskBar = computed(() => {
+  const state = selectedBodyTask.value?.state
+  return state === 'queued' || state === 'downloading' || state === 'error'
+})
 
 const headerMetrics = computed<HeaderMetric[]>(() => [
   {
@@ -1876,16 +1914,29 @@ async function startEventStream() {
   }
 }
 
+let pollTickCount = 0
+
 onMounted(async () => {
-  const storedTaxonomyWidth = Number(localStorage.getItem('easymail-taxonomy-width') || '142')
-  taxonomyPaneWidth.value = Math.min(240, Math.max(118, storedTaxonomyWidth || 142))
+  const storedTaxonomyWidth = Number(localStorage.getItem('easymail-taxonomy-width') || '136')
+  taxonomyPaneWidth.value = Math.min(220, Math.max(118, storedTaxonomyWidth || 136))
   await refreshState(Boolean(dashboard.value))
   startEventStream()
   refreshTimer = window.setInterval(() => {
-    if (!document.hidden && !sseConnected) {
+    if (document.hidden) return
+    pollTickCount += 1
+    // Always poll fast (1.5s) while queue/receive/login is active, even if SSE proxy buffers
+    if (hasActiveQueue.value) {
+      refreshState(true)
+      return
+    }
+    if (!sseConnected && pollTickCount % 3 === 0) {
+      refreshState(true)
+      return
+    }
+    if (sseConnected && pollTickCount % 10 === 0) {
       refreshState(true)
     }
-  }, 4000)
+  }, 1500)
   handleVisibilityChange = () => {
     if (document.hidden) {
       stopEventStream()
@@ -1925,7 +1976,7 @@ function computePageSize(containerHeight: number, rowHeight: number, minimum = 4
 function computeAccountPageSizeFromRows(container: HTMLElement) {
   const rows = Array.from(container.querySelectorAll<HTMLElement>('.account-row'))
   if (!rows.length) {
-    return computePageSize(container.clientHeight - 4, 70, 5)
+    return computePageSize(container.clientHeight - 4, 54, 6)
   }
   const firstRow = rows[0]
   const rowStyle = window.getComputedStyle(firstRow)
@@ -1944,7 +1995,7 @@ function scheduleAutoPageSizing() {
       accountPageSize.value = computeAccountPageSizeFromRows(accountListRef.value)
     }
     if (mailListRef.value) {
-      mailPageSize.value = computePageSize(mailListRef.value.clientHeight - 18, 66, 6)
+      mailPageSize.value = computePageSize(mailListRef.value.clientHeight - 16, 56, 6)
     }
   })
 }
@@ -2704,6 +2755,7 @@ async function handleReceiveChecked() {
     const response = await receiveAccounts({ emails: checkedAccounts.value, priority: true })
     showSuccess(response.message)
     await refreshState(true)
+    window.setTimeout(() => refreshState(true), 1200)
   } catch (error: any) {
     showError(error?.response?.data?.detail || '收件失败')
   }
@@ -2985,6 +3037,7 @@ async function runSingleReceive(email: string) {
     const response = await receiveAccounts({ emails: [email], priority: true })
     showSuccess(response.message)
     await refreshState(true)
+    window.setTimeout(() => refreshState(true), 1200)
   } catch (error: any) {
     showError(error?.response?.data?.detail || '收件失败')
   }

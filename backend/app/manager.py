@@ -67,6 +67,7 @@ class MailManager:
 
         self.login_q: queue.Queue[tuple[int, int, MailAccount]] = queue.PriorityQueue()
         self.receive_q: queue.Queue[tuple[int, int, MailAccount, bool]] = queue.PriorityQueue()
+        self.manual_receive_q: queue.Queue[tuple[int, int, MailAccount, bool]] = queue.PriorityQueue()
         self.body_q: queue.Queue[tuple[MailAccount, MailItem]] = queue.Queue()
         self.queue_sequence = 0
 
@@ -86,6 +87,7 @@ class MailManager:
         self.receive_done = 0
         self.login_busy_email = ""
         self.receive_busy_email = ""
+        self.receive_busy_emails: set[str] = set()
 
         self.token_refresh_running = False
         self.backup_running = False
@@ -116,6 +118,7 @@ class MailManager:
 
         repaired_accounts = self._repair_legacy_imported_accounts()
         repaired_mail_cache = 0
+        deduplicated_mails = 0
         extracted_code_cache = 0
         for account in self.accounts:
             if not account.group_name:
@@ -123,13 +126,28 @@ class MailManager:
             account.mails = self.storage.load_mail_cache(account, self.local_read_keys)
             account_cache_repairs = self._repair_mail_folder_cache(account)
             repaired_mail_cache += account_cache_repairs
+            account_dedup = self._deduplicate_account_mails(account)
+            deduplicated_mails += account_dedup
+            account_codes_changed = False
             for mail in account.mails:
                 if self.refresh_verification_codes(mail):
                     extracted_code_cache += 1
+                    account_codes_changed = True
             if account.mails and account.status == "待登录":
                 account.status = "已缓存"
-            if account_cache_repairs or extracted_code_cache:
+            if account_cache_repairs or account_dedup or account_codes_changed:
+                account.unseen_count = sum(1 for m in account.mails if m.is_unread)
                 self.storage.save_mail_cache(account)
+        if deduplicated_mails:
+            self._save_accounts_state()
+            self.log_event(
+                "info",
+                "mail_cache",
+                "deduplicate",
+                "batch",
+                "清理跨通道重复缓存邮件",
+                {"removed": deduplicated_mails},
+            )
         if repaired_accounts:
             self._save_accounts_state()
             self.log_event(
@@ -191,7 +209,8 @@ class MailManager:
 
     def _start_workers(self) -> None:
         threading.Thread(target=self.login_worker, daemon=True).start()
-        threading.Thread(target=self.receive_worker, daemon=True).start()
+        threading.Thread(target=self.receive_worker, args=(self.receive_q,), daemon=True).start()
+        threading.Thread(target=self.receive_worker, args=(self.manual_receive_q,), daemon=True).start()
         threading.Thread(target=self.body_worker, daemon=True).start()
         threading.Thread(target=self.scheduler_worker, daemon=True).start()
 
@@ -553,6 +572,59 @@ class MailManager:
             return parts[1]
         return item.folder
 
+    def _deduplicate_account_mails(self, account: MailAccount) -> int:
+        if len(account.mails) <= 1:
+            return 0
+        prefer_graph = account.auth_method == "Graph API"
+
+        def source_rank(item: MailItem) -> int:
+            if prefer_graph:
+                return {"graph": 3, "imap_uid": 2, "imap": 1}.get(item.source, 0)
+            return {"imap_uid": 3, "graph": 2, "imap": 1}.get(item.source, 0)
+
+        def item_score(item: MailItem) -> tuple[int, int, int, int]:
+            return (
+                source_rank(item),
+                1 if item.body_text else 0,
+                1 if item.body_html else 0,
+                1 if item.is_starred else 0,
+            )
+
+        best_by_fp: dict[tuple[str, str, str, str], MailItem] = {}
+        removed = 0
+        for item in account.mails:
+            folder_norm = self._folder_display_name(item.folder)
+            sender = self._extract_sender_email(item.from_text).strip().lower()
+            subject = (item.subject or "").strip().lower()
+            date_min = item.date_value.strftime("%Y-%m-%d %H:%M")
+            fp = (folder_norm, subject, sender, date_min)
+            existing = best_by_fp.get(fp)
+            if existing is None:
+                best_by_fp[fp] = item
+                continue
+            removed += 1
+            if item_score(item) > item_score(existing):
+                winner, loser = item, existing
+                best_by_fp[fp] = winner
+            else:
+                winner, loser = existing, item
+            if not winner.body_text and loser.body_text:
+                winner.body_text = loser.body_text
+            if not winner.body_html and loser.body_html:
+                winner.body_html = loser.body_html
+            if not winner.verification_codes and loser.verification_codes:
+                winner.verification_codes = loser.verification_codes
+            if loser.is_starred:
+                winner.is_starred = True
+            if not loser.is_unread:
+                winner.is_unread = False
+
+        if removed:
+            deduped = list(best_by_fp.values())
+            deduped.sort(key=lambda m: m.date_value, reverse=True)
+            account.mails = deduped
+        return removed
+
     def _repair_mail_folder_cache(self, account: MailAccount) -> int:
         repaired = 0
         for item in account.mails:
@@ -642,9 +714,9 @@ class MailManager:
         self.login_busy_email = ""
 
     def reset_receive_progress(self) -> None:
-        self.receive_total = 0
+        self.receive_total = len(self.receive_busy_emails)
         self.receive_done = 0
-        self.receive_busy_email = ""
+        self.receive_busy_email = "、".join(sorted(self.receive_busy_emails))
 
     def _drain_queue(self, current_queue: queue.Queue) -> None:
         while True:
@@ -654,13 +726,13 @@ class MailManager:
                 break
 
     def _clear_runtime_queues(self) -> None:
-        for current_queue in (self.login_q, self.receive_q, self.body_q):
+        for current_queue in (self.login_q, self.receive_q, self.manual_receive_q, self.body_q):
             self._drain_queue(current_queue)
 
     def _clear_receive_queue(self) -> None:
         self._drain_queue(self.receive_q)
-        busy = {self.receive_busy_email} if self.receive_busy_email else set()
-        self.queued_receive = set(busy)
+        self._drain_queue(self.manual_receive_q)
+        self.queued_receive = set(self.receive_busy_emails)
 
     def _clear_login_queue(self) -> None:
         self._drain_queue(self.login_q)
@@ -683,7 +755,8 @@ class MailManager:
             return
         self.queued_receive.add(account.email)
         self.receive_total += 1
-        self.receive_q.put((priority, self._next_queue_sequence(), account, incremental))
+        target_q = self.manual_receive_q if priority <= 20 else self.receive_q
+        target_q.put((priority, self._next_queue_sequence(), account, incremental))
 
     def enqueue_body(self, account: MailAccount, item: MailItem) -> BodyTask:
         if item.local_key in self.queued_body:
@@ -711,7 +784,7 @@ class MailManager:
                 email for email in self.queued_login if email != self.login_busy_email
             ),
             "pending_receive_emails": sorted(
-                email for email in self.queued_receive if email != self.receive_busy_email
+                email for email in self.queued_receive if email not in self.receive_busy_emails
             ),
             "pending_body_keys": sorted(self.queued_body),
             "percent": percent,
@@ -2078,18 +2151,21 @@ class MailManager:
                     self.queued_login.discard(account.email)
                 self._emit_event("account_updated", {"email": account.email})
 
-    def receive_worker(self) -> None:
+    def receive_worker(self, source_queue: Optional[queue.Queue] = None) -> None:
+        work_queue = source_queue if source_queue is not None else self.receive_q
         while True:
-            _, _, account, incremental = self.receive_q.get()
+            _, _, account, incremental = work_queue.get()
             instant_notifications: list[dict[str, str]] = []
             new_count = 0
             try:
                 with self.lock:
-                    self.receive_busy_email = account.email
+                    self.receive_busy_emails.add(account.email)
+                    self.receive_busy_email = "、".join(sorted(self.receive_busy_emails))
                     account.status = "收信中"
                     existing_mails = list(account.mails)
                     local_read_keys = set(self.local_read_keys)
                     existing_keys = {item.local_key for item in existing_mails}
+                self._emit_event("queue_updated", {"email": account.email, "status": "收信中"})
                 unseen, mails, message = fetch_mails_once(
                     account,
                     local_read_keys,
@@ -2097,12 +2173,13 @@ class MailManager:
                     incremental=incremental,
                 )
                 with self.lock:
-                    account.unseen_count = unseen
                     account.mails = mails
+                    self._deduplicate_account_mails(account)
+                    account.unseen_count = sum(1 for item in account.mails if item.is_unread)
                     account.last_check = format_shanghai_time(self._now_shanghai())
-                    new_items = [item for item in mails if item.local_key not in existing_keys]
+                    new_items = [item for item in account.mails if item.local_key not in existing_keys]
                     new_count = len(new_items)
-                    codes_changed = any(self.refresh_verification_codes(item) for item in mails)
+                    codes_changed = any(self.refresh_verification_codes(item) for item in account.mails)
                     auto_body_queued = 0
                     if "成功" in message:
                         for item in new_items:
@@ -2121,7 +2198,7 @@ class MailManager:
                                 "receive_success",
                                 account.email,
                                 f"收到 {len(new_items)} 封新邮件",
-                                {"new_count": len(new_items), "unseen": unseen, "method": account.auth_method, "incremental": incremental},
+                                {"new_count": len(new_items), "unseen": account.unseen_count, "method": account.auth_method, "incremental": incremental},
                             )
                     else:
                         account.status = "收信失败"
@@ -2143,7 +2220,8 @@ class MailManager:
             finally:
                 with self.lock:
                     self.receive_done += 1
-                    self.receive_busy_email = ""
+                    self.receive_busy_emails.discard(account.email)
+                    self.receive_busy_email = "、".join(sorted(self.receive_busy_emails))
                     self.queued_receive.discard(account.email)
                 # Push real-time SSE event to web clients BEFORE sending TG notifications
                 self._emit_event("mail_received", {"email": account.email, "new_count": new_count})

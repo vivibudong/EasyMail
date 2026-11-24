@@ -1060,12 +1060,14 @@ async def dashboard_events(
 
     async def event_stream():
         try:
+            # 2KB comment padding defeats reverse-proxy initial chunk buffering
+            yield ":" + (" " * 2048) + "\n\n"
             yield f"data: {json.dumps({'type': 'connected', 'version': manager.state_version})}\n\n"
             while True:
                 if await request.is_disconnected():
                     break
                 try:
-                    event = await asyncio.to_thread(subscriber.get, True, 15.0)
+                    event = await asyncio.to_thread(subscriber.get, True, 10.0)
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 except queue.Empty:
                     yield ": keepalive\n\n"

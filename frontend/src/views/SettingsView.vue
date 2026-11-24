@@ -1,21 +1,26 @@
 <template>
   <AppLayout title="系统设置" description="按模块管理导入规则、阅读偏好、通知与自动任务。">
-    <div class="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
-      <aside class="card p-3">
-        <div class="space-y-1">
-          <button
-            v-for="item in sections"
-            :key="item.key"
-            class="flex w-full items-center rounded-xl px-3 py-2.5 text-left text-sm transition-colors"
-            :class="
-              currentSection === item.key
-                ? 'bg-primary-50 text-primary-700 dark:bg-primary-900/10 dark:text-primary-300'
-                : 'text-gray-600 hover:bg-gray-50 dark:text-dark-300 dark:hover:bg-dark-800/60'
-            "
-            @click="switchSection(item.key)"
-          >
-            <span>{{ item.label }}</span>
-          </button>
+    <div class="mx-auto grid max-w-6xl gap-5 lg:grid-cols-[200px_minmax(0,1fr)]">
+      <aside class="card h-fit p-2.5">
+        <div class="space-y-4">
+          <div v-for="group in sectionGroups" :key="group.title" class="space-y-0.5">
+            <div class="px-2.5 pb-1 text-[11px] font-semibold text-gray-400 dark:text-dark-500">
+              {{ group.title }}
+            </div>
+            <button
+              v-for="item in group.items"
+              :key="item.key"
+              class="flex w-full items-center rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors"
+              :class="
+                currentSection === item.key
+                  ? 'bg-primary-50 font-medium text-primary-700 dark:bg-primary-900/20 dark:text-primary-300'
+                  : 'text-gray-600 hover:bg-gray-50 dark:text-dark-300 dark:hover:bg-dark-800/60'
+              "
+              @click="switchSection(item.key)"
+            >
+              <span>{{ item.label }}</span>
+            </button>
+          </div>
         </div>
       </aside>
 
@@ -348,7 +353,6 @@
                       <th class="px-4 py-3">分组</th>
                       <th class="px-4 py-3">当前生效策略</th>
                       <th class="px-4 py-3">独立间隔（分钟）</th>
-                      <th class="px-4 py-3">快捷设定</th>
                     </tr>
                   </thead>
                   <tbody class="divide-y divide-gray-100 dark:divide-dark-700">
@@ -373,7 +377,7 @@
                       </td>
                       <td class="px-4 py-3">
                         <input
-                          class="input w-28 py-1.5 text-xs"
+                          class="input w-32 py-1.5 text-xs"
                           type="number"
                           min="0"
                           step="5"
@@ -382,52 +386,6 @@
                           @input="onGroupReceiveIntervalInput(group.name, ($event.target as HTMLInputElement).value)"
                           @blur="normalizeGroupReceiveInterval(group.name)"
                         />
-                      </td>
-                      <td class="px-4 py-3">
-                        <div class="flex flex-wrap gap-1.5">
-                          <button
-                            type="button"
-                            class="btn btn-secondary btn-sm px-2 py-1 text-[11px]"
-                            @click="setGroupReceiveInterval(group.name, 0)"
-                          >
-                            永不(0)
-                          </button>
-                          <button
-                            type="button"
-                            class="btn btn-secondary btn-sm px-2 py-1 text-[11px]"
-                            @click="setGroupReceiveInterval(group.name, 30)"
-                          >
-                            30分
-                          </button>
-                          <button
-                            type="button"
-                            class="btn btn-secondary btn-sm px-2 py-1 text-[11px]"
-                            @click="setGroupReceiveInterval(group.name, 60)"
-                          >
-                            60分
-                          </button>
-                          <button
-                            type="button"
-                            class="btn btn-secondary btn-sm px-2 py-1 text-[11px]"
-                            @click="setGroupReceiveInterval(group.name, 180)"
-                          >
-                            3小时
-                          </button>
-                          <button
-                            type="button"
-                            class="btn btn-secondary btn-sm px-2 py-1 text-[11px]"
-                            @click="setGroupReceiveInterval(group.name, 360)"
-                          >
-                            6小时
-                          </button>
-                          <button
-                            type="button"
-                            class="btn btn-secondary btn-sm px-2 py-1 text-[11px]"
-                            @click="clearGroupReceiveInterval(group.name)"
-                          >
-                            默认
-                          </button>
-                        </div>
                       </td>
                     </tr>
                   </tbody>
@@ -724,13 +682,13 @@
           </div>
         </section>
 
-        <section class="card p-6">
+        <section v-if="showGlobalSaveFooter" class="card p-5">
           <div class="flex flex-wrap items-center gap-3">
-            <button class="btn btn-primary" :disabled="saving" @click="handleSave">
+            <button class="btn btn-primary btn-sm px-4 py-2" :disabled="saving" @click="handleSave">
               {{ saving ? '保存中...' : '保存设置' }}
             </button>
-            <div class="text-sm text-gray-500 dark:text-dark-400">
-              当前页面的所有配置会一起保存，并会被完整备份到 ZIP 文件中。
+            <div class="text-xs text-gray-500 dark:text-dark-400">
+              当前页面的配置会一起保存，并包含在 ZIP 完整备份中。
             </div>
           </div>
         </section>
@@ -767,18 +725,36 @@ import type { AppSettings, TranslateProviderOption } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
-const sections = [
-  { key: 'import', label: '导入规则' },
-  { key: 'reading', label: '阅读偏好' },
-  { key: 'translate', label: '翻译配置' },
-  { key: 'oauth', label: '微软授权' },
-  { key: 'notifications', label: '通知' },
-  { key: 'auto_receive', label: '自动收件' },
-  { key: 'refresh', label: '邮箱刷新' },
-  { key: 'backup', label: '备份' },
-  { key: 'security', label: '安全' },
-  { key: 'api', label: 'API' },
+const sectionGroups = [
+  {
+    title: '邮箱与收件',
+    items: [
+      { key: 'auto_receive', label: '自动收件' },
+      { key: 'refresh', label: '邮箱刷新' },
+      { key: 'import', label: '导入规则' },
+      { key: 'reading', label: '阅读偏好' },
+    ],
+  },
+  {
+    title: '通知与翻译',
+    items: [
+      { key: 'translate', label: '翻译配置' },
+      { key: 'notifications', label: '通知' },
+      { key: 'oauth', label: '微软授权' },
+    ],
+  },
+  {
+    title: '系统与安全',
+    items: [
+      { key: 'backup', label: '备份' },
+      { key: 'security', label: '安全' },
+      { key: 'api', label: 'API' },
+    ],
+  },
 ]
+
+const sections = sectionGroups.flatMap((group) => group.items)
+const showGlobalSaveFooter = computed(() => !['security', 'api'].includes(currentSection.value))
 
 const defaultTranslateProviders: TranslateProviderOption[] = [
   {
@@ -1184,19 +1160,6 @@ function normalizeGroupReceiveInterval(groupName: string) {
     map[groupName] = 30
   } else {
     map[groupName] = Math.round(val)
-  }
-}
-
-function setGroupReceiveInterval(groupName: string, minutes: number) {
-  if (!form.auto_receive_group_intervals) {
-    form.auto_receive_group_intervals = {}
-  }
-  form.auto_receive_group_intervals[groupName] = minutes <= 0 ? 0 : Math.max(30, minutes)
-}
-
-function clearGroupReceiveInterval(groupName: string) {
-  if (form.auto_receive_group_intervals) {
-    delete form.auto_receive_group_intervals[groupName]
   }
 }
 

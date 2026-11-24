@@ -642,7 +642,11 @@ def fetch_mails_once(
     *,
     incremental: bool = False,
 ) -> tuple[int, list[MailItem], str]:
-    if _is_outlook_graph_candidate(account):
+    prefer_imap_first = (
+        account.auth_method not in {"", "-", "Graph API"}
+        and not account.cached_graph_access_token
+    )
+    if _is_outlook_graph_candidate(account) and not prefer_imap_first:
         graph_unseen, graph_mails, graph_message = fetch_mails_via_graph(
             account,
             local_read_keys,
@@ -653,6 +657,15 @@ def fetch_mails_once(
             return graph_unseen, graph_mails, graph_message
     client, method, err = connect_imap(account)
     if client is None:
+        if prefer_imap_first and _is_outlook_graph_candidate(account):
+            graph_unseen, graph_mails, graph_message = fetch_mails_via_graph(
+                account,
+                local_read_keys,
+                existing_mails,
+                incremental=incremental,
+            )
+            if "成功" in graph_message:
+                return graph_unseen, graph_mails, graph_message
         return 0, existing_mails or [], err
     account.auth_method = method or "-"
     try:

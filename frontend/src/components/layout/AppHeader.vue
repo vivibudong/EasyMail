@@ -1,32 +1,27 @@
 <template>
-  <header class="glass sticky top-0 z-30 border-b border-gray-200/50 dark:border-dark-700/50">
-    <div class="flex h-14 items-center justify-between px-3 md:px-4">
-      <div class="flex items-center gap-4">
+  <header class="glass sticky top-0 z-30 shrink-0 border-b border-gray-200/60 dark:border-dark-700/60">
+    <div class="flex h-12 items-center justify-between px-3 md:px-4">
+      <div class="flex items-center gap-2.5">
         <RouterLink
           to="/dashboard"
-          class="flex h-9 w-9 items-center justify-center overflow-hidden rounded-xl shadow-glow transition-transform hover:scale-[1.02]"
+          class="flex h-7 w-7 items-center justify-center overflow-hidden rounded-lg shadow-sm transition-transform hover:scale-[1.03]"
         >
           <img src="/logo.svg" alt="EasyMail" class="h-full w-full object-contain" />
         </RouterLink>
+        <h1 class="text-sm font-semibold tracking-tight text-gray-900 dark:text-white">{{ title }}</h1>
         <VersionBadge />
-        <div>
-          <h1 class="text-base font-semibold text-gray-900 dark:text-white">{{ title }}</h1>
-          <p v-if="description" class="text-xs text-gray-500 dark:text-dark-400">
-            {{ description }}
-          </p>
-        </div>
       </div>
 
-      <div class="flex items-center gap-2 md:gap-3">
-        <div v-if="metrics?.length" class="hidden items-center gap-2 xl:flex">
+      <div class="flex items-center gap-1.5 md:gap-2">
+        <div v-if="metrics?.length" class="hidden items-center gap-1.5 xl:flex">
           <div
             v-for="metric in metrics"
             :key="metric.label"
             class="relative"
           >
             <button
-              class="inline-flex items-center gap-2 rounded-full border border-cyan-100 bg-white/80 px-3 py-1.5 text-xs text-slate-600 shadow-sm dark:border-cyan-900/40 dark:bg-dark-800/70 dark:text-dark-200"
-              :class="{ 'cursor-pointer hover:border-cyan-200 hover:bg-cyan-50/60 dark:hover:border-cyan-800 dark:hover:bg-dark-700/60': metric.clickable }"
+              class="inline-flex items-center gap-1.5 rounded-full border border-gray-200/80 bg-white/80 px-2.5 py-1 text-[11px] text-slate-600 transition-colors dark:border-dark-700 dark:bg-dark-800/70 dark:text-dark-200"
+              :class="{ 'cursor-pointer hover:border-primary-300 hover:bg-primary-50/50 dark:hover:border-primary-700 dark:hover:bg-dark-700/60': metric.clickable }"
               :data-header-popover-trigger="metric.key || ''"
               @click.stop="handleMetricClick(metric)"
             >
@@ -136,19 +131,18 @@
 
         <div class="relative">
           <button
-            class="flex items-center gap-2 rounded-xl p-1.5 transition-colors hover:bg-gray-100 dark:hover:bg-dark-800"
+            class="flex items-center gap-2 rounded-lg p-1 transition-colors hover:bg-gray-100 dark:hover:bg-dark-800"
             @click="dropdownOpen = !dropdownOpen"
           >
             <div
-              class="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-primary-500 to-primary-600 text-sm font-medium text-white shadow-sm"
+              class="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-primary-500 to-primary-600 text-xs font-medium text-white shadow-sm"
             >
               {{ initials }}
             </div>
             <div class="hidden text-left md:block">
-              <div class="text-sm font-medium text-gray-900 dark:text-white">
+              <div class="max-w-[160px] truncate text-xs font-medium text-gray-900 dark:text-white">
                 {{ authStore.user?.email }}
               </div>
-              <div class="text-xs text-gray-500 dark:text-dark-400">admin</div>
             </div>
             <Icon name="chevronDown" size="sm" class="hidden text-gray-400 md:block" />
           </button>
