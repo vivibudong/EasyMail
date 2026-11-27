@@ -51,6 +51,20 @@ from .models import (
     settings_to_dict,
 )
 from .storage import SqliteStorage
+from .telegram_bot import (
+    DEFAULT_TELEGRAM_INSTANT_TEMPLATE,
+    DEFAULT_TELEGRAM_SUMMARY_HEADER_TEMPLATE,
+    DEFAULT_TELEGRAM_SUMMARY_ITEM_TEMPLATE,
+    TELEGRAM_BUTTON_OPTIONS,
+    TELEGRAM_SUMMARY_VARIABLES,
+    TELEGRAM_TEMPLATE_VARIABLES,
+    TelegramBotWorker,
+    build_mail_inline_keyboard,
+    build_mail_template_context,
+    normalize_telegram_buttons,
+    render_telegram_template,
+    telegram_api_call,
+)
 from .translate import normalize_translate_model, normalize_translate_provider
 
 
@@ -216,11 +230,13 @@ class MailManager:
                 self.start_relogin_batch(startup_accounts)
 
     def _start_workers(self) -> None:
+        self.telegram_bot = TelegramBotWorker(self)
         threading.Thread(target=self.login_worker, daemon=True).start()
         threading.Thread(target=self.receive_worker, args=(self.receive_q,), daemon=True).start()
         threading.Thread(target=self.receive_worker, args=(self.manual_receive_q,), daemon=True).start()
         threading.Thread(target=self.body_worker, daemon=True).start()
         threading.Thread(target=self.scheduler_worker, daemon=True).start()
+        self.telegram_bot.start()
 
     def subscribe_events(self) -> queue.Queue[dict]:
         subscriber: queue.Queue[dict] = queue.Queue(maxsize=64)
@@ -307,36 +323,130 @@ class MailManager:
             and bool(self.settings.telegram_chat_id.strip())
         )
 
-    def _send_telegram_message(self, text: str) -> None:
+    def _send_telegram_message(
+        self,
+        text: str,
+        *,
+        parse_mode: Optional[str] = None,
+        reply_markup: Optional[dict] = None,
+    ) -> None:
         if not self._telegram_ready():
             raise ValueError("Telegram 未配置完整")
-        body = urllib.parse.urlencode(
-            {
-                "chat_id": self.settings.telegram_chat_id.strip(),
-                "text": text,
-            }
-        ).encode("utf-8")
-        request = urllib.request.Request(
-            f"https://api.telegram.org/bot{self.settings.telegram_bot_token.strip()}/sendMessage",
-            data=body,
-            method="POST",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        mode = parse_mode if parse_mode is not None else self.settings.telegram_parse_mode
+        payload: dict[str, object] = {
+            "chat_id": self.settings.telegram_chat_id.strip(),
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+        if str(mode or "").upper() == "HTML":
+            payload["parse_mode"] = "HTML"
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        try:
+            telegram_api_call(self.settings.telegram_bot_token.strip(), "sendMessage", payload, timeout=20)
+        except ValueError as exc:
+            # If user wrote invalid HTML tags in custom template, retry as plain text so notification isn't lost
+            if "can't parse entities" in str(exc).lower() and "parse_mode" in payload:
+                payload.pop("parse_mode", None)
+                telegram_api_call(self.settings.telegram_bot_token.strip(), "sendMessage", payload, timeout=20)
+                return
+            raise
+
+    def get_telegram_template_meta(self) -> dict:
+        return {
+            "default_instant_template": DEFAULT_TELEGRAM_INSTANT_TEMPLATE,
+            "default_summary_header_template": DEFAULT_TELEGRAM_SUMMARY_HEADER_TEMPLATE,
+            "default_summary_item_template": DEFAULT_TELEGRAM_SUMMARY_ITEM_TEMPLATE,
+            "variables": TELEGRAM_TEMPLATE_VARIABLES,
+            "summary_variables": TELEGRAM_SUMMARY_VARIABLES,
+            "button_options": TELEGRAM_BUTTON_OPTIONS,
+        }
+
+    def render_instant_mail_notification(
+        self,
+        account: MailAccount,
+        item: MailItem,
+        *,
+        template_override: Optional[str] = None,
+        parse_mode_override: Optional[str] = None,
+    ) -> str:
+        parse_mode = (
+            parse_mode_override
+            if parse_mode_override is not None
+            else (self.settings.telegram_parse_mode or "HTML")
         )
-        with urllib.request.urlopen(request, timeout=20) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-        payload = json.loads(raw)
-        if not payload.get("ok"):
-            raise ValueError(str(payload))
+        template = (
+            template_override
+            if template_override is not None
+            else (self.settings.telegram_instant_template.strip() or DEFAULT_TELEGRAM_INSTANT_TEMPLATE)
+        )
+        codes = [str(c.get("code", "")).strip() for c in (item.verification_codes or []) if isinstance(c, dict)]
+        ctx, raw_keys = build_mail_template_context(
+            group_name=account.group_name or "未分组",
+            account_email=account.email,
+            folder=self._folder_display_name(item.folder),
+            subject=item.subject,
+            sender=item.from_text,
+            sender_email=self._extract_sender_email(item.from_text),
+            date_text=item.date_text or format_shanghai_time(item.date_value),
+            codes=codes,
+            preview=item.body_text,
+            has_attachments=bool(item.has_attachments or item.attachments),
+            note=account.note,
+            tags=account.tags,
+            parse_mode=parse_mode,
+        )
+        return render_telegram_template(template, ctx, parse_mode=parse_mode, raw_keys=raw_keys)
+
+    def render_sample_notification_text(
+        self,
+        *,
+        template_override: Optional[str] = None,
+        parse_mode_override: Optional[str] = None,
+    ) -> str:
+        parse_mode = (
+            parse_mode_override
+            if parse_mode_override is not None
+            else (self.settings.telegram_parse_mode or "HTML")
+        )
+        template = (
+            template_override
+            if template_override is not None
+            else (self.settings.telegram_instant_template.strip() or DEFAULT_TELEGRAM_INSTANT_TEMPLATE)
+        )
+        ctx, raw_keys = build_mail_template_context(
+            group_name="示例分组",
+            account_email="demo@outlook.com",
+            folder="收件箱",
+            subject="[测试通知] Your verification code is 482910",
+            sender="EasyMail Bot <noreply@easymail.local>",
+            sender_email="noreply@easymail.local",
+            date_text=format_shanghai_time(self._now_shanghai()),
+            codes=["482910"],
+            preview="Hello! Your EasyMail verification code is 482910. Click buttons below to test interactive actions.",
+            has_attachments=True,
+            note="示例备注",
+            tags=["VIP", "测试"],
+            parse_mode=parse_mode,
+        )
+        return render_telegram_template(template, ctx, parse_mode=parse_mode, raw_keys=raw_keys)
 
     def send_test_telegram_notification(self) -> None:
-        text = (
-            "EasyMail 通知\n"
-            "====================\n"
-            "🧪 测试通知\n"
-            f"🕒 时间：{format_shanghai_time(self._now_shanghai())}\n"
-            "如果你收到这条消息，说明 Telegram Bot 配置可用。"
-        )
-        self._send_telegram_message(text)
+        parse_mode = self.settings.telegram_parse_mode or "HTML"
+        text = self.render_sample_notification_text()
+        reply_markup = None
+        if self.settings.telegram_interactive_enabled:
+            buttons = normalize_telegram_buttons(self.settings.telegram_buttons)
+            reply_markup = build_mail_inline_keyboard(
+                "demo0001",
+                enabled_buttons=buttons,
+                expanded=False,
+                is_starred=False,
+                is_unread=True,
+                has_attachments=True,
+                is_test=True,
+            )
+        self._send_telegram_message(text, parse_mode=parse_mode, reply_markup=reply_markup)
         self.log_event("info", "notification", "telegram_test", "telegram", "发送 Telegram 测试通知")
 
     def _should_notify_account(self, account: MailAccount) -> bool:
@@ -372,44 +482,69 @@ class MailManager:
         fp_key = "fp:" + hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:32]
         return item.local_key, fp_key
 
-    def _notify_new_mail_instant(self, group_name: str, account_email: str, subject: str, sender_email: str) -> None:
-        text = (
-            "EasyMail 通知\n"
-            "====================\n"
-            "📬 收到一封新邮件\n"
-            f"📁 分组：{group_name or '未分组'}\n"
-            f"📮 邮箱：{account_email}\n"
-            f"📝 主题：{subject}\n"
-            f"📨 发件人：{sender_email}"
-        )
-        self._send_telegram_message(text)
+    def _notify_new_mail_instant(self, payload: dict) -> None:
+        local_key = str(payload.get("local_key", "") or "")
+        parse_mode = self.settings.telegram_parse_mode or "HTML"
+        text = ""
+        reply_markup = None
+        with self.lock:
+            item = self.mail_items.get(local_key) if local_key else None
+            account = self.find_account(item.account_email) if item else self.find_account(str(payload.get("email", "")))
+            interactive = bool(self.settings.telegram_interactive_enabled)
+            buttons = normalize_telegram_buttons(self.settings.telegram_buttons)
+            if account and item:
+                text = self.render_instant_mail_notification(account, item)
+                if interactive and hasattr(self, "telegram_bot"):
+                    ref_id = self.telegram_bot.register_mail_ref(item.local_key)
+                    reply_markup = build_mail_inline_keyboard(
+                        ref_id,
+                        enabled_buttons=buttons,
+                        expanded=False,
+                        is_starred=item.is_starred,
+                        is_unread=item.is_unread,
+                        has_attachments=bool(item.has_attachments or item.attachments),
+                    )
+        if not text:
+            ctx, raw_keys = build_mail_template_context(
+                group_name=str(payload.get("group_name") or "未分组"),
+                account_email=str(payload.get("email") or "-"),
+                folder=str(payload.get("folder") or "收件箱"),
+                subject=str(payload.get("subject") or "(无主题)"),
+                sender=str(payload.get("sender") or payload.get("sender_email") or "-"),
+                sender_email=str(payload.get("sender_email") or "-"),
+                date_text=str(payload.get("date_text") or format_shanghai_time(self._now_shanghai())),
+                codes=list(payload.get("codes") or []),
+                preview=str(payload.get("preview") or ""),
+                has_attachments=bool(payload.get("has_attachments", False)),
+                note=str(payload.get("note") or ""),
+                tags=list(payload.get("tags") or []),
+                parse_mode=parse_mode,
+            )
+            template = self.settings.telegram_instant_template.strip() or DEFAULT_TELEGRAM_INSTANT_TEMPLATE
+            text = render_telegram_template(template, ctx, parse_mode=parse_mode, raw_keys=raw_keys)
+        self._send_telegram_message(text, parse_mode=parse_mode, reply_markup=reply_markup)
 
-    def _dispatch_instant_notifications_async(self, payloads: list[dict[str, str]]) -> None:
+    def _dispatch_instant_notifications_async(self, payloads: list[dict]) -> None:
         if not payloads:
             return
 
         def runner() -> None:
             for item in payloads:
                 try:
-                    self._notify_new_mail_instant(
-                        item["group_name"],
-                        item["email"],
-                        item["subject"],
-                        item["sender_email"],
-                    )
+                    self._notify_new_mail_instant(item)
                 except Exception as exc:
                     self.log_event(
                         "error",
                         "notification",
                         "telegram_instant_failed",
-                        item["email"],
+                        str(item.get("email", "")),
                         "新邮件 Telegram 通知失败",
                         {"error": str(exc)},
                     )
 
         threading.Thread(target=runner, daemon=True).start()
 
-    def _queue_mail_notifications(self, account: MailAccount, items: list[MailItem]) -> list[dict[str, str]]:
+    def _queue_mail_notifications(self, account: MailAccount, items: list[MailItem]) -> list[dict]:
         if not self._telegram_ready():
             return []
         if self.settings.telegram_mail_mode == "off" or not self._should_notify_account(account):
@@ -437,10 +572,19 @@ class MailManager:
         if self.settings.telegram_mail_mode == "instant":
             return [
                 {
+                    "local_key": item.local_key,
                     "group_name": account.group_name or "未分组",
                     "email": account.email,
+                    "folder": self._folder_display_name(item.folder),
                     "subject": item.subject,
+                    "sender": item.from_text,
                     "sender_email": self._extract_sender_email(item.from_text),
+                    "date_text": item.date_text or format_shanghai_time(item.date_value),
+                    "codes": [str(c.get("code", "")).strip() for c in (item.verification_codes or []) if isinstance(c, dict)],
+                    "preview": item.body_text,
+                    "has_attachments": bool(item.has_attachments or item.attachments),
+                    "note": account.note,
+                    "tags": list(account.tags),
                 }
                 for item in eligible_items
             ]
@@ -458,8 +602,15 @@ class MailManager:
                     "local_key": item.local_key,
                     "group_name": account.group_name or "未分组",
                     "email": account.email,
+                    "folder": self._folder_display_name(item.folder),
                     "subject": item.subject,
+                    "sender": item.from_text,
                     "sender_email": self._extract_sender_email(item.from_text),
+                    "date_text": item.date_text or format_shanghai_time(item.date_value),
+                    "codes": [str(c.get("code", "")).strip() for c in (item.verification_codes or []) if isinstance(c, dict)],
+                    "has_attachments": bool(item.has_attachments or item.attachments),
+                    "note": account.note,
+                    "tags": list(account.tags),
                     "received_at": now_text,
                 }
             )
@@ -484,6 +635,7 @@ class MailManager:
                         return
             items = self.pending_mail_notifications[:10]
             self.pending_mail_notifications = self.pending_mail_notifications[10:]
+            remaining_count = len(self.pending_mail_notifications)
             if self.pending_mail_notifications:
                 self.pending_mail_batch_started_at = now
                 self.last_mail_event_at = now
@@ -491,20 +643,46 @@ class MailManager:
                 self.pending_mail_batch_started_at = 0.0
                 self.last_mail_event_at = 0.0
             self.last_mail_summary_sent_at = now
+            parse_mode = self.settings.telegram_parse_mode or "HTML"
+            header_tpl = self.settings.telegram_summary_header_template.strip() or DEFAULT_TELEGRAM_SUMMARY_HEADER_TEMPLATE
+            item_tpl = self.settings.telegram_summary_item_template.strip() or DEFAULT_TELEGRAM_SUMMARY_ITEM_TEMPLATE
             self._persist_scheduler_state()
-        lines = [
-            "EasyMail 通知",
-            "====================",
-            f"📬 收到 {len(items)} 封新邮件",
-            f"📁 监听分组：{self._telegram_group_label()}",
-        ]
+
+        rendered_items: list[str] = []
         for item in items:
-            lines.append(f"• {item['email']} | {item['subject']}")
-            lines.append(f"  发件人：{item.get('sender_email') or '-'}")
-        if self.pending_mail_notifications:
-            lines.append(f"… 其余 {len(self.pending_mail_notifications)} 封将继续在下一条通知中发送")
+            ctx, raw_keys = build_mail_template_context(
+                group_name=str(item.get("group_name") or "未分组"),
+                account_email=str(item.get("email") or "-"),
+                folder=str(item.get("folder") or "收件箱"),
+                subject=str(item.get("subject") or "(无主题)"),
+                sender=str(item.get("sender") or item.get("sender_email") or "-"),
+                sender_email=str(item.get("sender_email") or "-"),
+                date_text=str(item.get("date_text") or item.get("received_at") or "-"),
+                codes=list(item.get("codes") or []),
+                preview="",
+                has_attachments=bool(item.get("has_attachments", False)),
+                note=str(item.get("note") or ""),
+                tags=list(item.get("tags") or []),
+                parse_mode=parse_mode,
+            )
+            rendered_items.append(render_telegram_template(item_tpl, ctx, parse_mode=parse_mode, raw_keys=raw_keys))
+
+        remaining_text = (
+            f"… 其余 {remaining_count} 封将继续在下一条通知中发送" if remaining_count > 0 else ""
+        )
+        summary_text = render_telegram_template(
+            header_tpl,
+            {
+                "count": str(len(items)),
+                "groups": self._telegram_group_label(),
+                "items": "\n".join(rendered_items),
+                "remaining": remaining_text,
+            },
+            parse_mode=parse_mode,
+            raw_keys={"items"},
+        )
         try:
-            self._send_telegram_message("\n".join(lines))
+            self._send_telegram_message(summary_text, parse_mode=parse_mode)
             self.log_event("info", "notification", "telegram_summary", "telegram", "发送 Telegram 邮件汇总通知", {"count": len(items)})
         except Exception as exc:
             self.log_event("error", "notification", "telegram_summary_failed", "telegram", "发送 Telegram 邮件汇总通知失败", {"error": str(exc), "count": len(items)})
@@ -1623,6 +1801,25 @@ class MailManager:
             )
             self.settings.telegram_notify_backup = bool(
                 payload.get("telegram_notify_backup", self.settings.telegram_notify_backup)
+            )
+            raw_parse_mode = str(
+                payload.get("telegram_parse_mode", self.settings.telegram_parse_mode) or "HTML"
+            ).strip().upper()
+            self.settings.telegram_parse_mode = "HTML" if raw_parse_mode == "HTML" else "plain"
+            if "telegram_instant_template" in payload:
+                self.settings.telegram_instant_template = str(payload.get("telegram_instant_template") or "")
+            if "telegram_summary_header_template" in payload:
+                self.settings.telegram_summary_header_template = str(payload.get("telegram_summary_header_template") or "")
+            if "telegram_summary_item_template" in payload:
+                self.settings.telegram_summary_item_template = str(payload.get("telegram_summary_item_template") or "")
+            self.settings.telegram_interactive_enabled = bool(
+                payload.get("telegram_interactive_enabled", self.settings.telegram_interactive_enabled)
+            )
+            if "telegram_buttons" in payload:
+                self.settings.telegram_buttons = normalize_telegram_buttons(payload.get("telegram_buttons"))
+            self.settings.telegram_body_max_chars = max(
+                400,
+                min(3200, int(payload.get("telegram_body_max_chars", self.settings.telegram_body_max_chars) or 1800)),
             )
             translate_provider = normalize_translate_provider(
                 payload.get("translate_provider", self.settings.translate_provider)

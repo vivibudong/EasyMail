@@ -151,6 +151,13 @@ export interface AppSettings {
   telegram_mail_groups: string[]
   telegram_mail_summary_minutes: number
   telegram_notify_backup: boolean
+  telegram_parse_mode: 'HTML' | 'plain'
+  telegram_instant_template: string
+  telegram_summary_header_template: string
+  telegram_summary_item_template: string
+  telegram_interactive_enabled: boolean
+  telegram_buttons: string[]
+  telegram_body_max_chars: number
   translate_provider: string
   translate_api_key: string
   translate_model: string

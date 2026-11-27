@@ -421,6 +421,15 @@ class SettingsRequest(BaseModel):
     telegram_mail_groups: list[str] = Field(default_factory=list)
     telegram_mail_summary_minutes: int = 60
     telegram_notify_backup: bool = False
+    telegram_parse_mode: str = "HTML"
+    telegram_instant_template: str = ""
+    telegram_summary_header_template: str = ""
+    telegram_summary_item_template: str = ""
+    telegram_interactive_enabled: bool = True
+    telegram_buttons: list[str] = Field(
+        default_factory=lambda: ["body", "translate", "attachments", "star", "mark_read", "delete"]
+    )
+    telegram_body_max_chars: int = 1800
     translate_provider: str = "free"
     translate_api_key: str = ""
     translate_model: str = ""
@@ -1705,6 +1714,11 @@ async def restore_backup(
     return ok("备份已恢复，账号正在重新登录", result)
 
 
+@app.get("/api/notifications/template-meta")
+def get_notification_template_meta(current_user: dict = Depends(get_current_user)) -> dict:
+    return ok("ok", manager.get_telegram_template_meta())
+
+
 @app.post("/api/notifications/test")
 def send_test_notification(current_user: dict = Depends(get_current_user)) -> dict:
     try:
@@ -1713,7 +1727,7 @@ def send_test_notification(current_user: dict = Depends(get_current_user)) -> di
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Telegram 发送失败: {exc}") from exc
-    return ok("Telegram 测试通知已发送")
+    return ok("Telegram 测试通知已发送（含自定义模板与交互按钮演示）")
 
 
 @app.get("/api/translate/providers")

@@ -288,14 +288,191 @@
               <input v-model="form.telegram_notify_backup" type="checkbox" />
               备份成功后发送通知
             </label>
+
+            <div class="border-t border-gray-100 pt-5 dark:border-dark-700 md:col-span-2">
+              <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 class="text-sm font-semibold text-gray-900 dark:text-white">推送格式与 Telegram 互动融合</h3>
+                  <p class="mt-0.5 text-xs text-gray-500 dark:text-dark-400">
+                    开启后，新邮件推送下方将附带交互按钮，可直接在 TG 中展开正文、一键翻译、下载附件、标星、已读或删除邮件。
+                  </p>
+                </div>
+              </div>
+
+              <div class="grid gap-4 md:grid-cols-2">
+                <label class="space-y-1.5">
+                  <span class="input-label mb-0">推送文本格式</span>
+                  <select v-model="form.telegram_parse_mode" class="input text-sm">
+                    <option value="HTML">HTML 富文本（推荐：支持加粗与点击复制验证码）</option>
+                    <option value="plain">纯文本（Plain Text）</option>
+                  </select>
+                </label>
+
+                <label class="space-y-1.5">
+                  <span class="input-label mb-0">TG 展开正文最大字数（400 ~ 3200）</span>
+                  <input
+                    v-model.number="form.telegram_body_max_chars"
+                    class="input"
+                    type="number"
+                    min="400"
+                    max="3200"
+                    step="100"
+                  />
+                </label>
+
+                <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-dark-300 md:col-span-2">
+                  <input v-model="form.telegram_interactive_enabled" type="checkbox" />
+                  启用 Telegram 互动按钮与 Bot 快捷指令（免 Webhook，通过长轮询自动响应）
+                </label>
+
+                <div v-if="form.telegram_interactive_enabled" class="space-y-2 md:col-span-2">
+                  <span class="input-label mb-0">消息下方显示的互动按钮</span>
+                  <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    <label
+                      v-for="btn in notificationMeta.button_options"
+                      :key="btn.id"
+                      class="flex cursor-pointer items-start gap-2 rounded-xl border border-gray-200 px-3 py-2 text-xs transition-colors hover:bg-gray-50 dark:border-dark-700 dark:hover:bg-dark-800/60"
+                    >
+                      <input
+                        v-model="form.telegram_buttons"
+                        :value="btn.id"
+                        type="checkbox"
+                        class="mt-0.5 shrink-0"
+                      />
+                      <span class="min-w-0">
+                        <span class="block font-medium text-gray-900 dark:text-white">{{ btn.label }}</span>
+                        <span class="mt-0.5 block text-[11px] leading-4 text-gray-500 dark:text-dark-400">
+                          {{ btn.description }}
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+                  <div class="rounded-xl border border-sky-100 bg-sky-50/70 px-3 py-2 text-[11px] leading-5 text-sky-800 dark:border-sky-900/50 dark:bg-sky-900/15 dark:text-sky-200">
+                    <strong>内置 Bot 快捷指令（仅响应上方配置的 Chat ID）：</strong>
+                    <code class="mx-1 font-mono">/status</code> 查看运行状态 ·
+                    <code class="mx-1 font-mono">/latest</code> 获取最近 5 封邮件（带操作按钮） ·
+                    <code class="mx-1 font-mono">/receive 邮箱|all</code> 远程触发收件 ·
+                    <code class="mx-1 font-mono">/help</code> 帮助
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="border-t border-gray-100 pt-5 dark:border-dark-700 md:col-span-2">
+              <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 class="text-sm font-semibold text-gray-900 dark:text-white">自定义实时新邮件模板</h3>
+                  <p class="mt-0.5 text-xs text-gray-500 dark:text-dark-400">
+                    留空将使用默认模板。点击下方变量胶囊可直接插入光标位置；HTML 模式下可使用
+                    <code class="font-mono">&lt;b&gt;</code>、<code class="font-mono">&lt;i&gt;</code>、<code class="font-mono">&lt;code&gt;</code> 标签。
+                  </p>
+                </div>
+                <button type="button" class="btn btn-secondary btn-sm" @click="resetInstantTemplate">
+                  填入默认模板
+                </button>
+              </div>
+
+              <div class="mb-2.5 flex flex-wrap gap-1.5">
+                <button
+                  v-for="item in notificationMeta.variables"
+                  :key="item.key"
+                  type="button"
+                  class="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-[11px] text-gray-700 transition-colors hover:border-primary-300 hover:bg-primary-50 hover:text-primary-700 dark:border-dark-700 dark:bg-dark-800 dark:text-dark-200 dark:hover:border-primary-700 dark:hover:bg-primary-900/20"
+                  :title="`示例：${item.example}`"
+                  @click="insertTemplateVariable(item.key)"
+                >
+                  <span class="font-mono font-semibold">{{ item.key }}</span>
+                  <span class="ml-1 opacity-75">{{ item.label }}</span>
+                </button>
+              </div>
+
+              <div class="grid gap-4 lg:grid-cols-2">
+                <div class="space-y-1.5">
+                  <span class="text-xs font-medium text-gray-600 dark:text-dark-300">模板编辑</span>
+                  <textarea
+                    ref="instantTemplateInput"
+                    v-model="form.telegram_instant_template"
+                    class="input min-h-48 font-mono text-xs leading-5"
+                    :placeholder="notificationMeta.default_instant_template"
+                  ></textarea>
+                </div>
+
+                <div class="space-y-1.5">
+                  <span class="text-xs font-medium text-gray-600 dark:text-dark-300">实时效果预览（模拟新邮件）</span>
+                  <div class="rounded-2xl border border-gray-200 bg-[#f0f4f8] p-3 dark:border-dark-700 dark:bg-dark-900/80">
+                    <div
+                      class="whitespace-pre-wrap break-words rounded-xl bg-white px-3.5 py-2.5 text-xs leading-6 text-gray-800 shadow-sm dark:bg-dark-800 dark:text-dark-100"
+                      v-html="renderedNotificationPreviewHtml"
+                    ></div>
+                    <div
+                      v-if="form.telegram_interactive_enabled && previewButtonRows.length"
+                      class="mt-1.5 space-y-1"
+                    >
+                      <div
+                        v-for="(row, rIdx) in previewButtonRows"
+                        :key="rIdx"
+                        class="flex gap-1"
+                      >
+                        <div
+                          v-for="label in row"
+                          :key="label"
+                          class="flex-1 rounded-lg bg-sky-500/15 py-1.5 text-center text-[11px] font-medium text-sky-700 dark:bg-sky-400/15 dark:text-sky-300"
+                        >
+                          {{ label }}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <details class="mt-4 rounded-xl border border-gray-200 px-4 py-3 dark:border-dark-700">
+                <summary class="cursor-pointer select-none text-xs font-semibold text-gray-700 dark:text-dark-200">
+                  高级：自定义「每小时汇总」通知模板（点击展开）
+                </summary>
+                <div class="mt-3 space-y-3">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="text-xs text-gray-500 dark:text-dark-400">
+                      汇总头部可用变量：
+                      <code
+                        v-for="sv in notificationMeta.summary_variables"
+                        :key="sv.key"
+                        class="mx-1 rounded bg-gray-100 px-1 py-0.5 font-mono text-[11px] dark:bg-dark-800"
+                      >{{ sv.key }}</code>
+                    </span>
+                    <button type="button" class="btn btn-secondary btn-sm" @click="resetSummaryTemplates">
+                      填入默认汇总模板
+                    </button>
+                  </div>
+                  <div class="grid gap-3 md:grid-cols-2">
+                    <label class="space-y-1.5">
+                      <span class="text-xs font-medium text-gray-600 dark:text-dark-300">汇总整体框架模板</span>
+                      <textarea
+                        v-model="form.telegram_summary_header_template"
+                        class="input min-h-32 font-mono text-xs leading-5"
+                        :placeholder="notificationMeta.default_summary_header_template"
+                      ></textarea>
+                    </label>
+                    <label class="space-y-1.5">
+                      <span class="text-xs font-medium text-gray-600 dark:text-dark-300">单条邮件项模板（填入 {items}）</span>
+                      <textarea
+                        v-model="form.telegram_summary_item_template"
+                        class="input min-h-32 font-mono text-xs leading-5"
+                        :placeholder="notificationMeta.default_summary_item_template"
+                      ></textarea>
+                    </label>
+                  </div>
+                </div>
+              </details>
+            </div>
           </div>
 
           <div class="card-footer flex flex-wrap items-center gap-3">
             <button class="btn btn-secondary" :disabled="testingNotification" @click="handleTestNotification">
-              {{ testingNotification ? '发送中...' : '测试通知' }}
+              {{ testingNotification ? '发送中...' : '保存并发送测试通知' }}
             </button>
             <div class="text-xs text-gray-500 dark:text-dark-400">
-              建议先让目标账号与 Bot 私聊一次，再执行测试通知。
+              测试通知会使用当前模板并附带可点击演示的互动按钮，点击按钮可现场测试正文展开与翻译效果。
             </div>
           </div>
         </section>
@@ -756,6 +933,7 @@ import {
   disableApiToken,
   enableApiToken,
   getApiTokens,
+  getNotificationTemplateMeta,
   getSettings,
   getTokenRefreshHistory,
   getTranslateProviders,
@@ -766,6 +944,7 @@ import {
   sendTestNotification,
   testTranslateService,
   type ApiTokenItem,
+  type NotificationTemplateMeta,
 } from '@/api/dashboard'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -933,6 +1112,13 @@ const form = reactive<AppSettings>({
   telegram_mail_groups: [],
   telegram_mail_summary_minutes: 60,
   telegram_notify_backup: false,
+  telegram_parse_mode: 'HTML',
+  telegram_instant_template: '',
+  telegram_summary_header_template: '',
+  telegram_summary_item_template: '',
+  telegram_interactive_enabled: true,
+  telegram_buttons: ['body', 'translate', 'attachments', 'star', 'mark_read', 'delete'],
+  telegram_body_max_chars: 1800,
   translate_provider: 'free',
   translate_api_key: '',
   translate_model: '',
@@ -942,6 +1128,43 @@ const form = reactive<AppSettings>({
 const saving = ref(false)
 const savingSecurity = ref(false)
 const testingNotification = ref(false)
+const instantTemplateInput = ref<HTMLTextAreaElement | null>(null)
+const notificationMeta = ref<NotificationTemplateMeta>({
+  default_instant_template:
+    '<b>📬 收到一封新邮件</b>\n━━━━━━━━━━━━━━\n<b>📁 分组：</b>{group}\n<b>📮 邮箱：</b><code>{email}</code>\n<b>📝 主题：</b>{subject}\n<b>📨 发件人：</b>{sender_email}\n<b>🕒 时间：</b>{date}\n{codes_line}\n{has_attachments}',
+  default_summary_header_template:
+    '<b>📬 收到 {count} 封新邮件</b>\n━━━━━━━━━━━━━━\n<b>📁 监听分组：</b>{groups}\n\n{items}\n{remaining}',
+  default_summary_item_template: '• <code>{email}</code> | <b>{subject}</b>\n  发件人：{sender_email} {codes}',
+  variables: [
+    { key: '{group}', label: '分组', example: '重要账号' },
+    { key: '{email}', label: '收件邮箱', example: 'user@outlook.com' },
+    { key: '{folder}', label: '文件夹', example: '收件箱' },
+    { key: '{subject}', label: '邮件主题', example: 'Your verification code is 482910' },
+    { key: '{sender}', label: '发件人全称', example: 'GitHub <noreply@github.com>' },
+    { key: '{sender_email}', label: '发件人邮箱', example: 'noreply@github.com' },
+    { key: '{date}', label: '邮件时间', example: '2026-11-27 09:30:00' },
+    { key: '{codes}', label: '验证码', example: '482910' },
+    { key: '{codes_line}', label: '智能验证码行', example: '🔑 验证码：482910' },
+    { key: '{preview}', label: '正文摘要', example: 'Hi, your one-time verification code is 482910...' },
+    { key: '{has_attachments}', label: '附件标识', example: '📎 包含附件' },
+    { key: '{note}', label: '账号备注', example: '主号 / 美区' },
+    { key: '{tags}', label: '账号标签', example: 'VIP、常用' },
+  ],
+  summary_variables: [
+    { key: '{count}', label: '本次新邮件数', example: '3' },
+    { key: '{groups}', label: '监听分组', example: '全部邮箱' },
+    { key: '{items}', label: '邮件列表块', example: '(按单条模板渲染)' },
+    { key: '{remaining}', label: '剩余待发提示', example: '… 其余 2 封将继续在下一条发送' },
+  ],
+  button_options: [
+    { id: 'body', label: '查看正文', description: '点击直接在 TG 中拉取并展开邮件纯文本正文（支持收起）' },
+    { id: 'translate', label: '翻译正文', description: '调用后台配置的翻译引擎将正文翻译为中文（支持原文切换）' },
+    { id: 'attachments', label: '获取附件', description: '当邮件包含附件时显示，点击直接发送文件/ZIP 到 TG' },
+    { id: 'star', label: '标星/取消标星', description: '一键切换邮件星标状态并同步到 Web 端' },
+    { id: 'mark_read', label: '标记已读', description: '一键将邮件标为已读并同步远程邮箱' },
+    { id: 'delete', label: '删除邮件', description: '带二次确认按钮，确认后同步删除远程与本地邮件' },
+  ],
+})
 const testingTranslation = ref(false)
 const translateTestResult = ref('')
 const showTranslateApiKey = ref(false)
@@ -1030,7 +1253,12 @@ onMounted(async () => {
   const response = await getSettings()
   Object.assign(form, response.data)
   securityForm.email = authStore.user?.email || ''
-  await Promise.all([loadTranslateProviders(), loadTokenRefreshHistory(), loadApiTokens()])
+  await Promise.all([
+    loadTranslateProviders(),
+    loadNotificationTemplateMeta(),
+    loadTokenRefreshHistory(),
+    loadApiTokens(),
+  ])
 })
 
 watch(
@@ -1289,6 +1517,111 @@ async function handleTestTranslation() {
     testingTranslation.value = false
   }
 }
+
+async function loadNotificationTemplateMeta() {
+  try {
+    const response = await getNotificationTemplateMeta()
+    if (response.data) {
+      notificationMeta.value = response.data
+    }
+  } catch {
+    // Keep built-in fallback metadata.
+  }
+}
+
+function insertTemplateVariable(token: string) {
+  const el = instantTemplateInput.value
+  const current = form.telegram_instant_template || ''
+  if (!el) {
+    form.telegram_instant_template = current ? `${current}${token}` : token
+    return
+  }
+  const start = el.selectionStart ?? current.length
+  const end = el.selectionEnd ?? current.length
+  form.telegram_instant_template = current.slice(0, start) + token + current.slice(end)
+  requestAnimationFrame(() => {
+    el.focus()
+    const nextPos = start + token.length
+    el.setSelectionRange(nextPos, nextPos)
+  })
+}
+
+function resetInstantTemplate() {
+  form.telegram_instant_template = notificationMeta.value.default_instant_template
+}
+
+function resetSummaryTemplates() {
+  form.telegram_summary_header_template = notificationMeta.value.default_summary_header_template
+  form.telegram_summary_item_template = notificationMeta.value.default_summary_item_template
+}
+
+function escapeHtmlSafe(text: string) {
+  return text
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+}
+
+const renderedNotificationPreviewHtml = computed(() => {
+  const mode = form.telegram_parse_mode === 'HTML' ? 'HTML' : 'plain'
+  const rawTpl = form.telegram_instant_template.trim() || notificationMeta.value.default_instant_template
+  const sampleCtx: Record<string, string> = {
+    group: '示例分组',
+    email: 'demo@outlook.com',
+    folder: '收件箱',
+    subject: 'Your verification code is 482910',
+    sender: 'EasyMail Bot <noreply@easymail.local>',
+    sender_email: 'noreply@easymail.local',
+    date: '2026-11-27 09:30:00',
+    codes: mode === 'HTML' ? '<code>482910</code>' : '482910',
+    codes_line: mode === 'HTML' ? '<b>🔑 验证码：</b><code>482910</code>' : '🔑 验证码：482910',
+    preview: 'Hello! Your EasyMail verification code is 482910...',
+    has_attachments: '📎 包含附件',
+    note: '主号 / 美区',
+    tags: 'VIP、常用',
+  }
+  const rendered = rawTpl.replace(/\{([a-zA-Z0-9_]+)\}/g, (match, key) => {
+    if (Object.prototype.hasOwnProperty.call(sampleCtx, key)) {
+      return mode === 'HTML' && !['codes', 'codes_line'].includes(key)
+        ? escapeHtmlSafe(sampleCtx[key])
+        : sampleCtx[key]
+    }
+    return match
+  })
+  const collapsed = rendered
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line, idx, arr) => !(line.trim() === '' && (idx === 0 || arr[idx - 1].trim() === '')))
+    .join('\n')
+    .trim()
+
+  if (mode !== 'HTML') {
+    return escapeHtmlSafe(collapsed)
+  }
+  // Safely render only Telegram-supported basic inline HTML tags in preview
+  const safe = escapeHtmlSafe(collapsed)
+  return safe
+    .replaceAll('&lt;b&gt;', '<strong>')
+    .replaceAll('&lt;/b&gt;', '</strong>')
+    .replaceAll('&lt;i&gt;', '<em>')
+    .replaceAll('&lt;/i&gt;', '</em>')
+    .replaceAll('&lt;code&gt;', '<code class="rounded bg-gray-100 px-1 py-0.5 font-mono text-[11px] text-primary-700 dark:bg-dark-700 dark:text-primary-300">')
+    .replaceAll('&lt;/code&gt;', '</code>')
+})
+
+const previewButtonRows = computed(() => {
+  const enabled = new Set(form.telegram_buttons || [])
+  const row1: string[] = []
+  if (enabled.has('body')) row1.push('📖 查看正文')
+  if (enabled.has('translate')) row1.push('🌐 翻译正文')
+  if (enabled.has('attachments')) row1.push('📎 获取附件')
+  const row2: string[] = []
+  if (enabled.has('star')) row2.push('☆ 标星')
+  if (enabled.has('mark_read')) row2.push('✅ 标为已读')
+  if (enabled.has('delete')) row2.push('🗑️ 删除')
+  return [row1, row2].filter((row) => row.length > 0)
+})
 
 async function handleTestNotification() {
   testingNotification.value = true

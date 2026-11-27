@@ -342,6 +342,20 @@ export async function saveSettings(settings: AppSettings) {
   return data
 }
 
+export interface NotificationTemplateMeta {
+  default_instant_template: string
+  default_summary_header_template: string
+  default_summary_item_template: string
+  variables: Array<{ key: string; label: string; example: string }>
+  summary_variables: Array<{ key: string; label: string; example: string }>
+  button_options: Array<{ id: string; label: string; description: string }>
+}
+
+export async function getNotificationTemplateMeta() {
+  const { data } = await apiClient.get<ApiResponse<NotificationTemplateMeta>>('/notifications/template-meta')
+  return data
+}
+
 export async function sendTestNotification() {
   const { data } = await apiClient.post<ApiResponse<Record<string, never>>>('/notifications/test')
   return data

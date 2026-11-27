@@ -111,6 +111,15 @@ class AppSettings:
     telegram_mail_groups: list[str] = field(default_factory=list)
     telegram_mail_summary_minutes: int = 60
     telegram_notify_backup: bool = False
+    telegram_parse_mode: str = "HTML"
+    telegram_instant_template: str = ""
+    telegram_summary_header_template: str = ""
+    telegram_summary_item_template: str = ""
+    telegram_interactive_enabled: bool = True
+    telegram_buttons: list[str] = field(
+        default_factory=lambda: ["body", "translate", "attachments", "star", "mark_read", "delete"]
+    )
+    telegram_body_max_chars: int = 1800
     translate_provider: str = "free"
     translate_api_key: str = ""
     translate_model: str = ""
@@ -313,6 +322,13 @@ def settings_to_dict(settings: AppSettings) -> dict:
         "telegram_mail_groups": normalize_telegram_mail_groups(settings.telegram_mail_groups),
         "telegram_mail_summary_minutes": settings.telegram_mail_summary_minutes,
         "telegram_notify_backup": settings.telegram_notify_backup,
+        "telegram_parse_mode": "HTML" if str(settings.telegram_parse_mode or "HTML").upper() == "HTML" else "plain",
+        "telegram_instant_template": settings.telegram_instant_template,
+        "telegram_summary_header_template": settings.telegram_summary_header_template,
+        "telegram_summary_item_template": settings.telegram_summary_item_template,
+        "telegram_interactive_enabled": bool(settings.telegram_interactive_enabled),
+        "telegram_buttons": normalize_telegram_buttons_list(settings.telegram_buttons),
+        "telegram_body_max_chars": max(400, min(3200, int(settings.telegram_body_max_chars or 1800))),
         "translate_provider": settings.translate_provider,
         "translate_api_key": settings.translate_api_key,
         "translate_model": settings.translate_model,
@@ -369,6 +385,19 @@ def normalize_telegram_mail_groups(values: object) -> list[str]:
         if not value or value in cleaned:
             continue
         cleaned.append(value)
+    return cleaned
+
+
+def normalize_telegram_buttons_list(values: object) -> list[str]:
+    valid = {"body", "translate", "attachments", "star", "mark_read", "delete"}
+    default_buttons = ["body", "translate", "attachments", "star", "mark_read", "delete"]
+    if not isinstance(values, list):
+        return default_buttons
+    cleaned: list[str] = []
+    for item in values:
+        key = str(item or "").strip().lower()
+        if key in valid and key not in cleaned:
+            cleaned.append(key)
     return cleaned
 
 
@@ -461,6 +490,17 @@ def settings_from_dict(data: dict) -> AppSettings:
         telegram_mail_groups=telegram_mail_groups,
         telegram_mail_summary_minutes=int(data.get("telegram_mail_summary_minutes", 60) or 60),
         telegram_notify_backup=bool(data.get("telegram_notify_backup", False)),
+        telegram_parse_mode=(
+            "HTML"
+            if str(data.get("telegram_parse_mode", "HTML") or "HTML").strip().upper() == "HTML"
+            else "plain"
+        ),
+        telegram_instant_template=str(data.get("telegram_instant_template", "") or ""),
+        telegram_summary_header_template=str(data.get("telegram_summary_header_template", "") or ""),
+        telegram_summary_item_template=str(data.get("telegram_summary_item_template", "") or ""),
+        telegram_interactive_enabled=bool(data.get("telegram_interactive_enabled", True)),
+        telegram_buttons=normalize_telegram_buttons_list(data.get("telegram_buttons")),
+        telegram_body_max_chars=max(400, min(3200, int(data.get("telegram_body_max_chars", 1800) or 1800))),
         translate_provider=str(data.get("translate_provider", "free") or "free").strip().lower(),
         translate_api_key=str(data.get("translate_api_key", "") or "").strip(),
         translate_model=str(data.get("translate_model", "") or "").strip(),
