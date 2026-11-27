@@ -113,6 +113,51 @@ def _escape_for_mode(value: str, parse_mode: str) -> str:
     return value or ""
 
 
+_TG_HTML_TAGS = {
+    "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
+    "code", "pre", "blockquote", "tg-spoiler", "a",
+}
+_TG_TAG_TOKEN_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)(\s+[^>]*)?>")
+
+
+def sanitize_telegram_html(text: str) -> str:
+    """Balance Telegram HTML tags: strip orphan closing tags and close unclosed opening tags."""
+    if not text or "<" not in text:
+        return text
+    out: list[str] = []
+    stack: list[str] = []
+    pos = 0
+    for match in _TG_TAG_TOKEN_RE.finditer(text):
+        out.append(text[pos : match.start()])
+        pos = match.end()
+        is_close = bool(match.group(1))
+        tag = match.group(2).lower()
+        attrs = match.group(3) or ""
+        if tag not in _TG_HTML_TAGS:
+            # Escape unknown tags so Telegram doesn't reject them
+            out.append(html.escape(match.group(0), quote=False))
+            continue
+        if not is_close:
+            if tag == "a" and attrs:
+                out.append(f"<{tag}{attrs}>")
+            else:
+                out.append(f"<{tag}>")
+            stack.append(tag)
+        else:
+            if tag not in stack:
+                # Drop stray unmatched closing tag (e.g. orphan </b>)
+                continue
+            while stack:
+                top = stack.pop()
+                out.append(f"</{top}>")
+                if top == tag:
+                    break
+    out.append(text[pos:])
+    while stack:
+        out.append(f"</{stack.pop()}>")
+    return "".join(out)
+
+
 def render_telegram_template(
     template: str,
     context: dict[str, str],
@@ -149,6 +194,8 @@ def render_telegram_template(
     result = "\n".join(collapsed)
     if len(result) > MAX_TG_MESSAGE_CHARS:
         result = result[: MAX_TG_MESSAGE_CHARS - 12] + "\n…(内容过长已截断)"
+    if mode == "HTML":
+        result = sanitize_telegram_html(result)
     return result
 
 
@@ -428,13 +475,23 @@ class TelegramBotWorker:
                 self._stop.wait(wait_sec)
 
     def _handle_update(self, bot_token: str, allowed_chat: str, update: dict[str, Any]) -> None:
-        callback = update.get("callback_query")
-        if isinstance(callback, dict):
-            self._handle_callback_query(bot_token, allowed_chat, callback)
-            return
-        message = update.get("message")
-        if isinstance(message, dict):
-            self._handle_command_message(bot_token, allowed_chat, message)
+        try:
+            callback = update.get("callback_query")
+            if isinstance(callback, dict):
+                self._handle_callback_query(bot_token, allowed_chat, callback)
+                return
+            message = update.get("message")
+            if isinstance(message, dict):
+                self._handle_command_message(bot_token, allowed_chat, message)
+        except Exception as exc:
+            self.manager.log_event(
+                "error",
+                "notification",
+                "telegram_update_error",
+                "telegram",
+                "Telegram 更新处理异常",
+                {"error": str(exc)},
+            )
 
     def _answer_callback(
         self,
@@ -464,10 +521,11 @@ class TelegramBotWorker:
         parse_mode: str = "HTML",
         reply_markup: Optional[dict[str, Any]] = None,
     ) -> None:
+        final_text = sanitize_telegram_html(text) if parse_mode == "HTML" else text
         payload: dict[str, Any] = {
             "chat_id": chat_id,
             "message_id": message_id,
-            "text": text,
+            "text": final_text,
             "disable_web_page_preview": True,
         }
         if parse_mode == "HTML":
@@ -477,8 +535,12 @@ class TelegramBotWorker:
         try:
             telegram_api_call(bot_token, "editMessageText", payload, timeout=15)
         except ValueError as exc:
-            # Ignore harmless "message is not modified" error
-            if "message is not modified" in str(exc).lower():
+            low = str(exc).lower()
+            if "message is not modified" in low:
+                return
+            if "can't parse entities" in low and "parse_mode" in payload:
+                payload.pop("parse_mode", None)
+                telegram_api_call(bot_token, "editMessageText", payload, timeout=15)
                 return
             raise
 
@@ -671,7 +733,18 @@ class TelegramBotWorker:
 
         prefix, action, ref_id = parts
         if prefix == "emt":
-            self._handle_test_callback(bot_token, chat_id, message_id, callback_id, action, ref_id)
+            try:
+                self._handle_test_callback(bot_token, chat_id, message_id, callback_id, action, ref_id)
+            except Exception as exc:
+                self.manager.log_event(
+                    "error",
+                    "notification",
+                    "telegram_test_callback_error",
+                    ref_id,
+                    "Telegram 测试按钮回调异常",
+                    {"action": action, "error": str(exc)},
+                )
+                self._answer_callback(bot_token, callback_id, f"操作失败：{str(exc)[:120]}", show_alert=True)
             return
 
         local_key = self.resolve_mail_ref(ref_id)

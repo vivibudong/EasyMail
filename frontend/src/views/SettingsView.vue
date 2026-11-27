@@ -395,6 +395,12 @@
                     class="input min-h-48 font-mono text-xs leading-5"
                     :placeholder="notificationMeta.default_instant_template"
                   ></textarea>
+                  <div
+                    v-if="instantTemplateHtmlWarning"
+                    class="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-800 dark:border-amber-800/60 dark:bg-amber-900/20 dark:text-amber-200"
+                  >
+                    {{ instantTemplateHtmlWarning }}
+                  </div>
                 </div>
 
                 <div class="space-y-1.5">
@@ -1562,6 +1568,37 @@ function escapeHtmlSafe(text: string) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
 }
+
+const instantTemplateHtmlWarning = computed(() => {
+  if (form.telegram_parse_mode !== 'HTML') return ''
+  const tpl = form.telegram_instant_template || ''
+  if (!tpl.includes('<')) return ''
+  const allowed = new Set(['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del', 'code', 'pre', 'blockquote', 'tg-spoiler', 'a'])
+  const stack: string[] = []
+  const stray: string[] = []
+  const re = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)(?:\s+[^>]*)?>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(tpl)) !== null) {
+    const isClose = Boolean(m[1])
+    const tag = m[2].toLowerCase()
+    if (!allowed.has(tag)) continue
+    if (!isClose) {
+      stack.push(tag)
+    } else {
+      const idx = stack.lastIndexOf(tag)
+      if (idx === -1) {
+        stray.push(`</${tag}>`)
+      } else {
+        stack.splice(idx)
+      }
+    }
+  }
+  if (!stray.length && !stack.length) return ''
+  const parts: string[] = []
+  if (stray.length) parts.push(`多余闭合标签 ${stray.join(' ')}`)
+  if (stack.length) parts.push(`未闭合标签 ${stack.map((t) => `<${t}>`).join(' ')}`)
+  return `检测到 HTML 标签未配对（${parts.join('，')}），推送时会自动修复，建议清理模板中的多余标签。`
+})
 
 const renderedNotificationPreviewHtml = computed(() => {
   const mode = form.telegram_parse_mode === 'HTML' ? 'HTML' : 'plain'
